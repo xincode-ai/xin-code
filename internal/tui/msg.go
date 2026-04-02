@@ -78,6 +78,11 @@ type MsgError struct {
 	Err error
 }
 
+// MsgSystemNotice 系统通知（如自动压缩提示）
+type MsgSystemNotice struct {
+	Text string
+}
+
 // MsgWindowSize 窗口大小变化
 type MsgWindowSize struct {
 	Width  int

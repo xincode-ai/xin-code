@@ -7,22 +7,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// 斜杠命令列表
-var slashCommands = []string{
-	"/help", "/quit", "/exit", "/model", "/version", "/clear", "/compact",
-}
-
 // InputBox 输入框组件
 type InputBox struct {
-	textarea textarea.Model
-	history  []string
-	histIdx  int // -1 表示当前输入
-	current  string // 浏览历史时暂存当前输入
-	width    int
+	textarea      textarea.Model
+	history       []string
+	histIdx       int // -1 表示当前输入
+	current       string // 浏览历史时暂存当前输入
+	width         int
+	slashCommands []string // 斜杠命令列表（由外部注入）
 }
 
 // NewInputBox 创建输入框
-func NewInputBox() InputBox {
+func NewInputBox(commands []string) InputBox {
 	ta := textarea.New()
 	ta.Placeholder = "输入消息... (Enter 发送, Shift+Enter 换行)"
 	ta.Prompt = StyleInputPrompt.Render("> ")
@@ -32,8 +28,9 @@ func NewInputBox() InputBox {
 	ta.Focus()
 
 	return InputBox{
-		textarea: ta,
-		histIdx:  -1,
+		textarea:      ta,
+		histIdx:       -1,
+		slashCommands: commands,
 	}
 }
 
@@ -110,12 +107,12 @@ func (i InputBox) View() string {
 	hint := ""
 	if strings.HasPrefix(val, "/") && !strings.Contains(val, " ") {
 		var matches []string
-		for _, cmd := range slashCommands {
+		for _, cmd := range i.slashCommands {
 			if strings.HasPrefix(cmd, val) {
 				matches = append(matches, cmd)
 			}
 		}
-		if len(matches) > 0 {
+		if len(matches) > 0 && len(matches) <= 10 {
 			hint = StyleHint.Render("  " + strings.Join(matches, "  "))
 		}
 	}

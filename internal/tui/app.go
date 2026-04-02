@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/xincode-ai/xin-code/internal/cost"
+	"github.com/xincode-ai/xin-code/internal/slash"
 )
 
 // AppState TUI 状态机
@@ -34,6 +35,9 @@ type App struct {
 	permission PermissionDialog
 	spinner    spinner.Model
 
+	// 斜杠命令
+	slashHandler *slash.Handler
+
 	// 状态
 	state     AppState
 	width     int
@@ -49,21 +53,36 @@ type App struct {
 
 	// 配置
 	model      string
+	provider   string
 	tracker    *cost.Tracker
 	maxContext int
 	version    string
 	toolCount  int
 	permMode   string
+	workDir    string
+
+	// 会话回调（由 main.go 注入）
+	OnClear       func()
+	OnCompact     func() string
+	OnModelSwitch func(string)
+	OnExport      func() string
+	OnResume      func() string
+
+	// 会话信息
+	SessionID    string
+	SessionTurns int
 }
 
 // AppConfig TUI 初始化配置
 type AppConfig struct {
 	Model      string
+	Provider   string
 	Tracker    *cost.Tracker
 	MaxContext int
 	Version    string
 	ToolCount  int
 	PermMode   string
+	WorkDir    string
 }
 
 // NewApp 创建 TUI 应用
@@ -72,23 +91,28 @@ func NewApp(cfg AppConfig) *App {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(ColorAccent)
 
+	slashH := slash.NewHandler()
+
 	return &App{
-		statusBar:  NewStatusBar(cfg.Model, cfg.Tracker, cfg.MaxContext),
-		chat:       NewChatView(80, 20),
-		input:      NewInputBox(),
-		permission: NewPermissionDialog(),
-		spinner:    sp,
+		statusBar:    NewStatusBar(cfg.Model, cfg.Tracker, cfg.MaxContext),
+		chat:         NewChatView(80, 20),
+		input:        NewInputBox(slashH.CommandNames()),
+		permission:   NewPermissionDialog(),
+		spinner:      sp,
+		slashHandler: slashH,
 
 		state:      StateInput,
 		eventCh:    make(chan tea.Msg, 512),
 		submitCh:   make(chan string, 8),
 
 		model:      cfg.Model,
+		provider:   cfg.Provider,
 		tracker:    cfg.Tracker,
-		maxContext:  cfg.MaxContext,
+		maxContext: cfg.MaxContext,
 		version:    cfg.Version,
 		toolCount:  cfg.ToolCount,
 		permMode:   cfg.PermMode,
+		workDir:    cfg.WorkDir,
 	}
 }
 
@@ -144,7 +168,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case MsgTextDelta, MsgThinking, MsgToolStart, MsgToolDone,
 		MsgUsage, MsgResponseDone, MsgAgentDone,
-		MsgPermissionRequest, MsgDiffPreview, MsgAskUser, MsgError:
+		MsgPermissionRequest, MsgDiffPreview, MsgAskUser, MsgError,
+		MsgSystemNotice:
 		a.waitingForEvent = false
 	}
 
@@ -332,6 +357,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, a.input.Focus())
 		return a, tea.Batch(cmds...)
 
+	case MsgSystemNotice:
+		a.chat.AddSystemMessage(StyleHint.Render(msg.Text))
+		cmds = append(cmds, a.safeWaitForEvent())
+		return a, tea.Batch(cmds...)
+
 	case MsgError:
 		a.chat, _ = a.chat.Update(msg)
 		a.state = StateInput
@@ -395,30 +425,60 @@ func (a *App) View() string {
 }
 
 func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
-	switch cmd {
-	case "/quit", "/exit":
-		a.quitting = true
-		return a, tea.Quit
-	case "/help":
-		help := strings.Join([]string{
-			StyleBrand.Render("可用命令:"),
-			"  /help    - 帮助信息",
-			"  /model   - 当前模型",
-			"  /version - 版本信息",
-			"  /clear   - 清屏",
-			"  /quit    - 退出",
-			"",
-			StyleHint.Render("快捷键: Ctrl+C 中断/退出  Ctrl+L 清屏"),
-		}, "\n")
-		a.chat.AddSystemMessage(help)
-	case "/model":
-		a.chat.AddSystemMessage(fmt.Sprintf("当前模型: %s", StyleModel.Render(a.model)))
-	case "/version":
-		a.chat.AddSystemMessage(fmt.Sprintf("xin-code %s", a.version))
-	case "/clear":
-		a.chat.Clear()
-	default:
-		a.chat.AddSystemMessage(StyleErrorMsg.Render("未知命令: " + cmd))
+	// 构建命令上下文
+	ctx := &slash.Context{
+		Model:               a.model,
+		Provider:            a.provider,
+		Version:             a.version,
+		PermMode:            a.permMode,
+		Currency:            a.tracker.Currency(),
+		MaxContext:           a.maxContext,
+		InputTokens:         a.tracker.InputTokens(),
+		OutputTokens:        a.tracker.OutputTokens(),
+		TotalTokens:         a.tracker.TotalTokens(),
+		CostString:          a.tracker.CostString(),
+		CostUSD:             a.tracker.TotalCostUSD(),
+		SessionID:           a.SessionID,
+		SessionTurns:        a.SessionTurns,
+		WorkDir:             a.workDir,
+		CacheCreationTokens: a.tracker.CacheCreationTokens(),
+		CacheReadTokens:     a.tracker.CacheReadTokens(),
+		OnClear:             a.OnClear,
+		OnCompact:           a.OnCompact,
+		OnModelSwitch:       a.OnModelSwitch,
+		OnExport:            a.OnExport,
+		OnResume:            a.OnResume,
 	}
+
+	result, handled := a.slashHandler.Handle(cmd, ctx)
+	if !handled {
+		return a, nil
+	}
+
+	switch result.Type {
+	case slash.ResultAction:
+		switch result.Content {
+		case "quit":
+			a.quitting = true
+			return a, tea.Quit
+		case "clear":
+			a.chat.Clear()
+			return a, nil
+		}
+
+	case slash.ResultPrompt:
+		// 预设 prompt -> 作为用户消息发送给 Agent
+		a.chat.AddSystemMessage(StyleHint.Render(fmt.Sprintf("[%s]", cmd)))
+		a.state = StateQuery
+		submitCmd := func() tea.Msg {
+			a.submitCh <- result.Content
+			return nil
+		}
+		return a, tea.Batch(submitCmd, a.safeWaitForEvent())
+
+	case slash.ResultDisplay:
+		a.chat.AddSystemMessage(result.Content)
+	}
+
 	return a, nil
 }

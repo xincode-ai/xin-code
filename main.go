@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xincode-ai/xin-code/internal/cost"
+	"github.com/xincode-ai/xin-code/internal/mcp"
 	"github.com/xincode-ai/xin-code/internal/provider"
+	"github.com/xincode-ai/xin-code/internal/session"
 	"github.com/xincode-ai/xin-code/internal/tool"
 	"github.com/xincode-ai/xin-code/internal/tool/builtin"
 	"github.com/xincode-ai/xin-code/internal/tui"
@@ -45,15 +48,91 @@ func main() {
 	// 创建费用追踪器
 	tracker := cost.NewTracker(cfg.Model, cfg.Cost.Currency)
 
+	// 创建会话
+	workDir, _ := os.Getwd()
+	store := session.NewStore(XinCodeDir())
+	sess := session.NewSession(cfg.Model, workDir)
+
+	// 初始化 MCP 客户端
+	mcpClient := mcp.NewClient()
+	if len(cfg.MCP) > 0 {
+		var mcpConfigs []mcp.ServerConfig
+		for _, m := range cfg.MCP {
+			mcpConfigs = append(mcpConfigs, mcp.ServerConfig{
+				Name:    m.Name,
+				Command: m.Command,
+				Args:    m.Args,
+				Env:     m.Env,
+			})
+		}
+		mcpClient.LoadConfigs(mcpConfigs)
+		// 异步连接 MCP 服务器
+		go func() {
+			ctx := context.Background()
+			_ = mcpClient.ConnectAll(ctx)
+		}()
+	}
+
 	// 创建 TUI
 	app := tui.NewApp(tui.AppConfig{
 		Model:      cfg.Model,
+		Provider:   providerName,
 		Tracker:    tracker,
-		MaxContext:  p.Capabilities().MaxContext,
+		MaxContext: p.Capabilities().MaxContext,
 		Version:    Version,
 		ToolCount:  10, // 内置工具数
 		PermMode:   cfg.Permission.Mode,
+		WorkDir:    workDir,
 	})
+
+	// 注入会话信息
+	app.SessionID = sess.ID
+	app.SessionTurns = sess.Turns
+
+	// 注入回调
+	app.OnClear = func() {
+		// 清空会话消息
+		sess.Messages = sess.Messages[:0]
+		sess.Turns = 0
+	}
+	app.OnCompact = func() string {
+		compacted, msg := session.CompactMessages(sess.Messages)
+		sess.Messages = compacted
+		return msg
+	}
+	app.OnExport = func() string {
+		md := sess.ExportMarkdown()
+		exportPath := filepath.Join(workDir, fmt.Sprintf("session-%s.md", sess.ID))
+		if err := os.WriteFile(exportPath, []byte(md), 0644); err != nil {
+			return fmt.Sprintf("导出失败: %s", err)
+		}
+		return fmt.Sprintf("已导出到: %s", exportPath)
+	}
+	app.OnResume = func() string {
+		entries, err := store.List(workDir)
+		if err != nil {
+			return fmt.Sprintf("获取历史会话失败: %s", err)
+		}
+		if len(entries) == 0 {
+			return "当前目录没有历史会话"
+		}
+		var sb []string
+		sb = append(sb, "📋 历史会话:\n")
+		for i, e := range entries {
+			if i >= 10 {
+				sb = append(sb, fmt.Sprintf("  ... 还有 %d 个会话", len(entries)-10))
+				break
+			}
+			sb = append(sb, fmt.Sprintf("  %d. [%s] %s | %d 轮 | $%.4f",
+				i+1, e.ID, e.Model, e.Turns, e.CostUSD))
+		}
+		sb = append(sb, "\n暂不支持交互式选择恢复，功能开发中")
+		result := ""
+		for _, s := range sb {
+			result += s + "\n"
+		}
+		return result
+	}
 
 	// 注册工具（AskUser / DiffPreview 通过 TUI channel 交互）
 	tools := tool.NewRegistry()
@@ -80,8 +159,11 @@ func main() {
 		},
 	})
 
+	// MCP 工具注册
+	mcpClient.RegisterToRegistry(tools)
+
 	// 创建 Agent
-	agent := NewAgent(p, tools, cfg, func(msg interface{}) {
+	agent := NewAgent(p, tools, cfg, sess, store, tracker, func(msg interface{}) {
 		if m, ok := msg.(tea.Msg); ok {
 			app.Send(m)
 		}
@@ -92,6 +174,8 @@ func main() {
 		ctx := context.Background()
 		for userMsg := range app.SubmitCh() {
 			agent.Run(ctx, userMsg)
+			// 更新 TUI 中的会话信息
+			app.SessionTurns = sess.Turns
 		}
 	}()
 
@@ -101,4 +185,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "TUI 错误: %s\n", err)
 		os.Exit(1)
 	}
+
+	// 退出前保存会话和关闭 MCP
+	_ = store.Save(sess)
+	mcpClient.Close()
 }

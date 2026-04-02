@@ -96,6 +96,48 @@ func (t *Tracker) OutputTokens() int {
 	return t.totalOutput
 }
 
+// CacheCreationTokens 返回缓存写入 token 数
+func (t *Tracker) CacheCreationTokens() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.totalCacheCreation
+}
+
+// CacheReadTokens 返回缓存读取 token 数
+func (t *Tracker) CacheReadTokens() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.totalCacheRead
+}
+
+// TotalCostUSD 返回 USD 总费用
+func (t *Tracker) TotalCostUSD() float64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.totalCostUSD
+}
+
+// Currency 返回当前货币
+func (t *Tracker) Currency() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.currency
+}
+
+// Model 返回模型名称
+func (t *Tracker) Model() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.model
+}
+
+// SetModel 切换模型
+func (t *Tracker) SetModel(model string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.model = model
+}
+
 // SetCurrency 切换货币
 func (t *Tracker) SetCurrency(currency string) {
 	t.mu.Lock()

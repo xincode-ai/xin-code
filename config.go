@@ -16,6 +16,15 @@ type Config struct {
 	MaxTurns   int              `json:"max_turns"`
 	Permission PermissionConfig `json:"permissions"`
 	Cost       CostConfig       `json:"cost"`
+	MCP        []MCPConfig      `json:"mcp_servers,omitempty"`
+}
+
+// MCPConfig MCP 服务器配置
+type MCPConfig struct {
+	Name    string            `json:"name"`
+	Command string            `json:"command"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
 }
 
 // PermissionConfig 权限配置
