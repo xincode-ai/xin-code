@@ -217,6 +217,8 @@ func main() {
 	}()
 
 	// 启动 TUI
+	// 预设终端背景色检测，避免 Lipgloss OSC 查询导致 ANSI 响应泄漏到输入框
+	os.Setenv("GLAMOUR_STYLE", "dark")
 	prog := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := prog.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI 错误: %s\n", err)

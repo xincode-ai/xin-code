@@ -2,6 +2,12 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
+func init() {
+	// 预设暗色背景，避免 Lipgloss 在运行时查询终端背景色（OSC 11），
+	// 查询的响应会被 Bubbletea 的 stdin reader 捕获并泄漏到输入框。
+	lipgloss.SetHasDarkBackground(true)
+}
+
 // 品牌色系
 var (
 	// 主色调

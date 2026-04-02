@@ -23,7 +23,8 @@ func NewInputBox(commands []string) InputBox {
 	ta.Placeholder = "输入消息... (Enter 发送, Shift+Enter 换行)"
 	ta.Prompt = StyleInputPrompt.Render("> ")
 	ta.CharLimit = 0 // 不限制
-	ta.MaxHeight = 10
+	ta.SetHeight(1)  // 初始 1 行高度
+	ta.MaxHeight = 6 // 最多扩展到 6 行
 	ta.ShowLineNumbers = false
 	ta.Focus()
 
@@ -60,6 +61,11 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 			}
 			text := strings.TrimSpace(i.textarea.Value())
 			if text == "" {
+				return i, nil
+			}
+			// 过滤掉终端 ANSI 转义序列响应（如 OSC 11 背景色查询的响应）
+			if strings.Contains(text, "\x1b") || strings.HasPrefix(text, "]") {
+				i.textarea.Reset()
 				return i, nil
 			}
 			// 保存到历史
