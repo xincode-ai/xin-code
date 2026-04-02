@@ -4,11 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
+
+// generateSessionID 生成 CC 风格的会话 UUID
+func generateSessionID() string {
+	b := make([]byte, 16)
+	for i := range b {
+		b[i] = byte(rand.Intn(256))
+	}
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // AnthropicProvider Claude API Provider
 type AnthropicProvider struct {
@@ -22,11 +33,13 @@ func NewAnthropicProvider(apiKey, model, baseURL, authSource string) (*Anthropic
 	var opts []option.RequestOption
 
 	if authSource == "cc-oauth" {
-		// CC OAuth 用户：使用 Bearer token 认证 + OAuth beta header
+		// CC OAuth 用户：完全模拟 Claude Code 的请求特征
 		opts = append(opts,
 			option.WithHeader("Authorization", "Bearer "+apiKey),
 			option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
-			// 设一个假的 API Key 防止 SDK 报错（实际认证走 Authorization header）
+			option.WithHeader("x-app", "cli"),
+			option.WithHeader("User-Agent", "claude-code/2.1.88"),
+			option.WithHeader("X-Claude-Code-Session-Id", generateSessionID()),
 			option.WithAPIKey("placeholder"),
 		)
 	} else {
