@@ -9,6 +9,9 @@ import (
 
 const maxConcurrentReadTools = 10
 
+// AskPermissionFunc 权限询问回调（阻塞直到用户回答）
+type AskPermissionFunc func(toolName string, input string) bool
+
 // ExecuteResult 单个工具执行结果
 type ExecuteResult struct {
 	ToolUseID string
@@ -17,7 +20,7 @@ type ExecuteResult struct {
 
 // ExecuteBatch 批量执行工具调用
 // 只读工具并发执行，写入工具顺序执行
-func (r *Registry) ExecuteBatch(ctx context.Context, calls []*provider.ToolCall, checker PermissionChecker) []ExecuteResult {
+func (r *Registry) ExecuteBatch(ctx context.Context, calls []*provider.ToolCall, checker PermissionChecker, askFn AskPermissionFunc) []ExecuteResult {
 	results := make([]ExecuteResult, len(calls))
 
 	// 分组：只读 vs 写入
@@ -46,7 +49,7 @@ func (r *Registry) ExecuteBatch(ctx context.Context, calls []*provider.ToolCall,
 			go func(ic indexedCall) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				result := r.executeWithPermission(ctx, ic.call, checker)
+				result := r.ExecuteWithPermission(ctx, ic.call, checker, askFn)
 				results[ic.index] = ExecuteResult{
 					ToolUseID: ic.call.ID,
 					Result:    result,
@@ -58,7 +61,7 @@ func (r *Registry) ExecuteBatch(ctx context.Context, calls []*provider.ToolCall,
 
 	// 写入工具顺序执行
 	for _, ic := range writeCalls {
-		result := r.executeWithPermission(ctx, ic.call, checker)
+		result := r.ExecuteWithPermission(ctx, ic.call, checker, askFn)
 		results[ic.index] = ExecuteResult{
 			ToolUseID: ic.call.ID,
 			Result:    result,
@@ -68,7 +71,8 @@ func (r *Registry) ExecuteBatch(ctx context.Context, calls []*provider.ToolCall,
 	return results
 }
 
-func (r *Registry) executeWithPermission(ctx context.Context, call *provider.ToolCall, checker PermissionChecker) *Result {
+// ExecuteWithPermission 执行单个工具调用（带权限检查 + 用户询问）
+func (r *Registry) ExecuteWithPermission(ctx context.Context, call *provider.ToolCall, checker PermissionChecker, askFn AskPermissionFunc) *Result {
 	t, ok := r.Get(call.Name)
 	if !ok {
 		return &Result{Content: "unknown tool: " + call.Name, IsError: true}
@@ -76,9 +80,19 @@ func (r *Registry) executeWithPermission(ctx context.Context, call *provider.Too
 
 	// 权限检查
 	if checker != nil {
-		allowed, reason := checker.Check(call.Name, t.IsReadOnly())
-		if !allowed {
+		checkResult, reason := checker.Check(call.Name, t.IsReadOnly())
+		switch checkResult {
+		case ResultAllow:
+			// 直接执行
+		case ResultDeny:
 			return &Result{Content: "permission denied: " + reason, IsError: true}
+		case ResultNeedAsk:
+			if askFn != nil {
+				if !askFn(call.Name, call.Input) {
+					return &Result{Content: "permission denied by user", IsError: true}
+				}
+			}
+			// askFn 为 nil 时默认放行（向后兼容）
 		}
 	}
 

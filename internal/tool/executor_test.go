@@ -35,7 +35,7 @@ func TestExecuteBatch(t *testing.T) {
 		{ID: "3", Name: "Bash", Input: "{}"},
 	}
 	checker := &SimplePermissionChecker{Mode: ModeBypass}
-	results := reg.ExecuteBatch(context.Background(), calls, checker)
+	results := reg.ExecuteBatch(context.Background(), calls, checker, nil)
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
@@ -55,7 +55,7 @@ func TestPlanModeBlocksWrites(t *testing.T) {
 		{ID: "1", Name: "Bash", Input: "{}"},
 	}
 	checker := &SimplePermissionChecker{Mode: ModePlan}
-	results := reg.ExecuteBatch(context.Background(), calls, checker)
+	results := reg.ExecuteBatch(context.Background(), calls, checker, nil)
 
 	if !results[0].Result.IsError {
 		t.Error("expected plan mode to block write tool")

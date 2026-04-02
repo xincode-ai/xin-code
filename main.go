@@ -1,17 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"strings"
-	"syscall"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/xincode-ai/xin-code/internal/cost"
 	"github.com/xincode-ai/xin-code/internal/provider"
 	"github.com/xincode-ai/xin-code/internal/tool"
 	"github.com/xincode-ai/xin-code/internal/tool/builtin"
+	"github.com/xincode-ai/xin-code/internal/tui"
 )
 
 func main() {
@@ -43,89 +42,63 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 注册工具
+	// 创建费用追踪器
+	tracker := cost.NewTracker(cfg.Model, cfg.Cost.Currency)
+
+	// 创建 TUI
+	app := tui.NewApp(tui.AppConfig{
+		Model:      cfg.Model,
+		Tracker:    tracker,
+		MaxContext:  p.Capabilities().MaxContext,
+		Version:    Version,
+		ToolCount:  10, // 内置工具数
+		PermMode:   cfg.Permission.Mode,
+	})
+
+	// 注册工具（AskUser / DiffPreview 通过 TUI channel 交互）
 	tools := tool.NewRegistry()
-	builtin.RegisterAll(tools)
+	builtin.RegisterAll(tools, builtin.RegisterConfig{
+		AskFunc: func(ctx context.Context, question string) (string, error) {
+			responseCh := make(chan string, 1)
+			app.Send(tui.MsgAskUser{Question: question, Response: responseCh})
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case answer := <-responseCh:
+				return answer, nil
+			}
+		},
+		ConfirmFunc: func(ctx context.Context, path string, diffText string) (bool, error) {
+			responseCh := make(chan bool, 1)
+			app.Send(tui.MsgDiffPreview{Path: path, DiffText: diffText, Response: responseCh})
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case confirmed := <-responseCh:
+				return confirmed, nil
+			}
+		},
+	})
 
 	// 创建 Agent
-	agent := NewAgent(p, tools, cfg, os.Stdout)
+	agent := NewAgent(p, tools, cfg, func(msg interface{}) {
+		if m, ok := msg.(tea.Msg); ok {
+			app.Send(m)
+		}
+	})
 
-	// 信号处理
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	// 启动 Agent goroutine：监听 TUI 提交的消息
 	go func() {
-		<-sigCh
-		cancel()
+		ctx := context.Background()
+		for userMsg := range app.SubmitCh() {
+			agent.Run(ctx, userMsg)
+		}
 	}()
 
-	// 打印欢迎信息
-	fmt.Printf("XIN CODE %s\n", Version)
-	fmt.Printf("model: %s  provider: %s\n", cfg.Model, p.Name())
-	fmt.Printf("tools: %d  mode: %s\n", len(tools.All()), cfg.Permission.Mode)
-	if cfg.Permission.Mode != "bypass" {
-		fmt.Fprintln(os.Stderr, "⚠ WARNING: Phase 1 权限系统尚未完整实现，所有工具调用将自动放行。Phase 2 将加入 TUI 确认机制。")
-	}
-	fmt.Println("---")
-	fmt.Println("输入消息开始对话。/help 查看命令，/quit 退出。")
-	fmt.Println()
-
-	// REPL 循环
-	scanner := bufio.NewScanner(os.Stdin)
-	for {
-		// 检查是否收到退出信号
-		select {
-		case <-ctx.Done():
-			fmt.Println("\n收到退出信号，再见！")
-			return
-		default:
-		}
-
-		fmt.Print("> ")
-		if !scanner.Scan() {
-			break
-		}
-		input := strings.TrimSpace(scanner.Text())
-		if input == "" {
-			continue
-		}
-
-		// 斜杠命令
-		if strings.HasPrefix(input, "/") {
-			switch input {
-			case "/quit", "/exit":
-				fmt.Println("再见！")
-				return
-			case "/help":
-				fmt.Println("可用命令:")
-				fmt.Println("  /help    - 帮助信息")
-				fmt.Println("  /model   - 显示当前模型")
-				fmt.Println("  /version - 版本信息")
-				fmt.Println("  /quit    - 退出")
-			case "/model":
-				fmt.Printf("当前模型: %s (%s)\n", cfg.Model, p.Name())
-			case "/version":
-				fmt.Printf("xin-code %s (%s %s)\n", Version, Commit, Date)
-			default:
-				fmt.Printf("未知命令: %s\n", input)
-			}
-			continue
-		}
-
-		// Shell 命令
-		if strings.HasPrefix(input, "!") {
-			cmd := strings.TrimPrefix(input, "!")
-			result := tools.ExecuteTool(ctx, &provider.ToolCall{
-				ID: "shell", Name: "Bash", Input: fmt.Sprintf(`{"command":%q}`, cmd),
-			})
-			fmt.Println(result.Content)
-			continue
-		}
-
-		// Agent 对话
-		if err := agent.Run(ctx, input); err != nil {
-			fmt.Fprintf(os.Stderr, "错误: %s\n", err)
-		}
+	// 启动 TUI
+	prog := tea.NewProgram(app, tea.WithAltScreen())
+	if _, err := prog.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI 错误: %s\n", err)
+		os.Exit(1)
 	}
 }
