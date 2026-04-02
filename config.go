@@ -66,6 +66,8 @@ type CostConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Model:     "claude-sonnet-4-6-20250514",
+		// 注意：模型 ID 需要和 Anthropic API 实际支持的一致
+		// 可通过 XINCODE_MODEL 环境变量覆盖
 		Provider:  "anthropic",
 		MaxTokens: 16384,
 		MaxTurns:  100,

@@ -204,6 +204,10 @@ func (c *ChatView) renderMessage(msg ChatMessage) string {
 	case "tool":
 		return c.renderToolMessage(msg)
 
+	case "system":
+		// 系统消息：已经用 Lipgloss 预渲染过，直接输出，不经过 Glamour
+		return msg.Content
+
 	case "error":
 		return StyleErrorMsg.Render("✗ " + msg.Content)
 
@@ -244,10 +248,10 @@ func (c *ChatView) renderToolMessage(msg ChatMessage) string {
 	return header
 }
 
-// AddSystemMessage 添加系统消息
+// AddSystemMessage 添加系统消息（已预渲染的 ANSI 文本，不经过 Glamour）
 func (c *ChatView) AddSystemMessage(text string) {
 	c.messages = append(c.messages, ChatMessage{
-		Role:    "assistant",
+		Role:    "system",
 		Content: text,
 	})
 	c.refreshContent()
