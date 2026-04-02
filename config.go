@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/xincode-ai/xin-code/internal/auth"
 )
 
 // Config 全局配置
@@ -17,6 +19,19 @@ type Config struct {
 	Permission PermissionConfig `json:"permissions"`
 	Cost       CostConfig       `json:"cost"`
 	MCP        []MCPConfig      `json:"mcp_servers,omitempty"`
+	Hooks      HooksConfig      `json:"hooks,omitempty"`
+}
+
+// HookDef 单个钩子定义
+type HookDef struct {
+	Match   string `json:"match"`
+	Command string `json:"command"`
+}
+
+// HooksConfig 钩子配置
+type HooksConfig struct {
+	PreToolUse  []HookDef `json:"preToolUse,omitempty"`
+	PostToolUse []HookDef `json:"postToolUse,omitempty"`
 }
 
 // MCPConfig MCP 服务器配置
@@ -83,12 +98,12 @@ func LoadConfig() *Config {
 	projectPath := filepath.Join(".xincode", "settings.json")
 	mergeConfigFile(cfg, projectPath)
 
-	// 3. 环境变量
-	if v := os.Getenv("XINCODE_API_KEY"); v != "" {
-		cfg.APIKey = v
-	} else if v := os.Getenv("ANTHROPIC_API_KEY"); v != "" {
-		cfg.APIKey = v
+	// 3. 环境变量 + CC OAuth（认证链）
+	apiKey, _ := auth.ResolveAPIKey(XinCodeDir())
+	if apiKey != "" {
+		cfg.APIKey = apiKey
 	}
+
 	if v := os.Getenv("XINCODE_MODEL"); v != "" {
 		cfg.Model = v
 	}

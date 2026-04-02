@@ -8,9 +8,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xincode-ai/xin-code/internal/cost"
+	"github.com/xincode-ai/xin-code/internal/hooks"
 	"github.com/xincode-ai/xin-code/internal/mcp"
+	"github.com/xincode-ai/xin-code/internal/plugins"
 	"github.com/xincode-ai/xin-code/internal/provider"
 	"github.com/xincode-ai/xin-code/internal/session"
+	"github.com/xincode-ai/xin-code/internal/skills"
 	"github.com/xincode-ai/xin-code/internal/tool"
 	"github.com/xincode-ai/xin-code/internal/tool/builtin"
 	"github.com/xincode-ai/xin-code/internal/tui"
@@ -29,8 +32,12 @@ func main() {
 	// 检查 API Key
 	if cfg.APIKey == "" {
 		fmt.Fprintln(os.Stderr, "错误: 未找到 API Key")
-		fmt.Fprintln(os.Stderr, "请设置环境变量: export ANTHROPIC_API_KEY=your-key")
-		fmt.Fprintln(os.Stderr, "或: export XINCODE_API_KEY=your-key")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "设置方式（任选其一）:")
+		fmt.Fprintln(os.Stderr, "  1. export ANTHROPIC_API_KEY=your-key")
+		fmt.Fprintln(os.Stderr, "  2. export OPENAI_API_KEY=your-key")
+		fmt.Fprintln(os.Stderr, "  3. export XINCODE_API_KEY=your-key")
+		fmt.Fprintln(os.Stderr, "  4. 安装 Claude Code 并登录（自动复用 OAuth token）")
 		os.Exit(1)
 	}
 
@@ -73,6 +80,31 @@ func main() {
 		}()
 	}
 
+	// 初始化技能系统
+	skillsRegistry := skills.NewRegistry()
+	skillsRegistry.Discover(XinCodeDir())
+
+	// 初始化插件系统
+	pluginsRegistry := plugins.NewRegistry()
+	pluginsRegistry.Discover(XinCodeDir())
+
+	// 初始化钩子系统
+	hooksConfig := hooks.LoadConfig(filepath.Join(XinCodeDir(), "settings.json"))
+	// 合并配置文件中的钩子定义
+	if len(cfg.Hooks.PreToolUse) > 0 || len(cfg.Hooks.PostToolUse) > 0 {
+		for _, h := range cfg.Hooks.PreToolUse {
+			hooksConfig.PreToolUse = append(hooksConfig.PreToolUse, hooks.HookDef{
+				Match: h.Match, Command: h.Command,
+			})
+		}
+		for _, h := range cfg.Hooks.PostToolUse {
+			hooksConfig.PostToolUse = append(hooksConfig.PostToolUse, hooks.HookDef{
+				Match: h.Match, Command: h.Command,
+			})
+		}
+	}
+	hooksMgr := hooks.NewManager(hooksConfig)
+
 	// 创建 TUI
 	app := tui.NewApp(tui.AppConfig{
 		Model:      cfg.Model,
@@ -88,6 +120,11 @@ func main() {
 	// 注入会话信息
 	app.SessionID = sess.ID
 	app.SessionTurns = sess.Turns
+
+	// 注入扩展系统回调
+	app.OnSkillsList = func() string { return skillsRegistry.ListString() }
+	app.OnPluginsList = func() string { return pluginsRegistry.ListString() }
+	app.OnHooksList = func() string { return hooksMgr.ListString() }
 
 	// 注入回调
 	app.OnClear = func() {
