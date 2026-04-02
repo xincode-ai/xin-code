@@ -22,7 +22,7 @@ type InputBox struct {
 func NewInputBox(commands []string) InputBox {
 	ta := textarea.New()
 	ta.Placeholder = "输入消息... (Enter 发送, Shift+Enter 换行)"
-	ta.Prompt = StyleInputPrompt.Render("> ")
+	ta.Prompt = StyleInputPrompt.Render("❯ ")
 	ta.CharLimit = 0 // 不限制
 	ta.SetHeight(1)  // 初始 1 行高度
 	ta.MaxHeight = 6 // 最多扩展到 6 行

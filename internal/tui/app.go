@@ -417,12 +417,12 @@ func (a *App) View() string {
 	chatView := a.chat.View()
 	sections = append(sections, chatView)
 
-	// 状态指示器
+	// 状态指示器（极简，不抢视觉）
 	switch a.state {
 	case StateQuery:
-		sections = append(sections, a.spinner.View()+StyleHint.Render(" 思考中..."))
+		sections = append(sections, "  "+a.spinner.View())
 	case StateToolExec:
-		sections = append(sections, a.spinner.View()+StyleHint.Render(" 执行工具..."))
+		sections = append(sections, "  "+a.spinner.View())
 	}
 
 	// 权限对话框（覆盖在输入框位置）
