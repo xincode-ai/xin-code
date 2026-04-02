@@ -25,10 +25,11 @@ func ResolveProviderName(model string) string {
 }
 
 // NewProvider 根据名称创建 Provider 实例
-func NewProvider(name, apiKey, model, baseURL string) (Provider, error) {
+// authSource 标识认证来源（"cc-oauth" / "env:xxx" / "config" 等）
+func NewProvider(name, apiKey, model, baseURL, authSource string) (Provider, error) {
 	switch name {
 	case "anthropic":
-		return NewAnthropicProvider(apiKey, model, baseURL)
+		return NewAnthropicProvider(apiKey, model, baseURL, authSource)
 	case "openai":
 		return NewOpenAIProvider(apiKey, model, baseURL)
 	default:

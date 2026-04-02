@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/xincode-ai/xin-code/internal/auth"
 	"github.com/xincode-ai/xin-code/internal/cost"
 	"github.com/xincode-ai/xin-code/internal/hooks"
 	"github.com/xincode-ai/xin-code/internal/mcp"
@@ -30,7 +31,17 @@ func main() {
 	// 加载配置
 	cfg := LoadConfig()
 
-	// 检查 API Key
+	// 认证链：通过 auth 模块按优先级解析 API Key
+	authSource := ""
+	if cfg.APIKey == "" {
+		// config.go 的 LoadConfig 已处理环境变量，这里补充 CC OAuth
+		apiKey, source := auth.ResolveAPIKey(XinCodeDir())
+		if apiKey != "" {
+			cfg.APIKey = apiKey
+			authSource = source
+		}
+	}
+
 	if cfg.APIKey == "" {
 		fmt.Fprintln(os.Stderr, "错误: 未找到 API Key")
 		fmt.Fprintln(os.Stderr, "")
@@ -47,7 +58,7 @@ func main() {
 	if providerName == "" {
 		providerName = provider.ResolveProviderName(cfg.Model)
 	}
-	p, err := provider.NewProvider(providerName, cfg.APIKey, cfg.Model, cfg.BaseURL)
+	p, err := provider.NewProvider(providerName, cfg.APIKey, cfg.Model, cfg.BaseURL, authSource)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Provider 初始化失败: %s\n", err)
 		os.Exit(1)

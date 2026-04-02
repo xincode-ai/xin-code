@@ -17,10 +17,22 @@ type AnthropicProvider struct {
 }
 
 // NewAnthropicProvider 创建 Anthropic Provider
-func NewAnthropicProvider(apiKey, model, baseURL string) (*AnthropicProvider, error) {
-	opts := []option.RequestOption{
-		option.WithAPIKey(apiKey),
+// authSource 标识认证来源，"cc-oauth" 时使用 Bearer token + beta header
+func NewAnthropicProvider(apiKey, model, baseURL, authSource string) (*AnthropicProvider, error) {
+	var opts []option.RequestOption
+
+	if authSource == "cc-oauth" {
+		// CC OAuth 用户：使用 Bearer token 认证 + OAuth beta header
+		opts = append(opts,
+			option.WithHeader("Authorization", "Bearer "+apiKey),
+			option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
+			// 设一个假的 API Key 防止 SDK 报错（实际认证走 Authorization header）
+			option.WithAPIKey("placeholder"),
+		)
+	} else {
+		opts = append(opts, option.WithAPIKey(apiKey))
 	}
+
 	if baseURL != "" {
 		opts = append(opts, option.WithBaseURL(baseURL))
 	}
