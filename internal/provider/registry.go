@@ -29,7 +29,8 @@ func NewProvider(name, apiKey, model, baseURL string) (Provider, error) {
 	switch name {
 	case "anthropic":
 		return NewAnthropicProvider(apiKey, model, baseURL)
-	// case "openai": Phase 4 实现
+	case "openai":
+		return NewOpenAIProvider(apiKey, model, baseURL)
 	default:
 		return nil, fmt.Errorf("unknown provider: %s", name)
 	}
