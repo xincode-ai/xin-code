@@ -45,6 +45,10 @@ type ChatView struct {
 
 	// Markdown 渲染器
 	renderer *glamour.TermRenderer
+
+	// Markdown 渲染缓存（原文 → 渲染结果，避免重复 parse）
+	mdCache    map[string]string
+	mdCacheMax int
 }
 
 // newGlamourRenderer 创建白色文字的 Glamour 渲染器
@@ -70,10 +74,12 @@ func NewChatView(width, height int) ChatView {
 	vp.MouseWheelDelta = 3
 
 	return ChatView{
-		viewport: vp,
-		width:    width,
-		height:   height,
-		renderer: newGlamourRenderer(width),
+		viewport:   vp,
+		width:      width,
+		height:     height,
+		renderer:   newGlamourRenderer(width),
+		mdCache:    make(map[string]string),
+		mdCacheMax: 500,
 	}
 }
 
@@ -89,6 +95,8 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.viewport.Width = msg.Width
 		c.viewport.Height = msg.Height
 		c.renderer = newGlamourRenderer(msg.Width)
+		// 渲染器因宽度变化而重建，清空缓存
+		c.mdCache = make(map[string]string)
 		c.refreshContent(c.shouldAutoScroll())
 
 	case MsgSpinnerTick:
@@ -286,12 +294,22 @@ func (c *ChatView) renderMessage(msg ChatMessage) string {
 		return prefix + StyleUserText.Render(strings.TrimSpace(msg.Content))
 
 	case "assistant":
-		// MessageResponse 包裹 Glamour 渲染的 Markdown
+		// MessageResponse 包裹 Glamour 渲染的 Markdown（带缓存）
 		body := msg.Content
 		if c.renderer != nil {
-			rendered, err := c.renderer.Render(msg.Content)
-			if err == nil {
-				body = strings.TrimSpace(rendered)
+			if cached, ok := c.mdCache[body]; ok {
+				body = cached
+			} else {
+				rendered, err := c.renderer.Render(body)
+				if err == nil {
+					original := body
+					body = strings.TrimSpace(rendered)
+					// 缓存满时简单清空重来
+					if len(c.mdCache) >= c.mdCacheMax {
+						c.mdCache = make(map[string]string)
+					}
+					c.mdCache[original] = body
+				}
 			}
 		}
 		return wrapMessageResponse(body)
