@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xincode-ai/xin-code/internal/auth"
+	"github.com/xincode-ai/xin-code/internal/setup"
 	"github.com/xincode-ai/xin-code/internal/cost"
 	"github.com/xincode-ai/xin-code/internal/hooks"
 	"github.com/xincode-ai/xin-code/internal/mcp"
@@ -45,14 +46,30 @@ func main() {
 	}
 
 	if cfg.APIKey == "" {
-		fmt.Fprintln(os.Stderr, "错误: 未找到 API Key")
-		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "设置方式（任选其一）:")
-		fmt.Fprintln(os.Stderr, "  1. export ANTHROPIC_API_KEY=your-key")
-		fmt.Fprintln(os.Stderr, "  2. export OPENAI_API_KEY=your-key")
-		fmt.Fprintln(os.Stderr, "  3. export XINCODE_API_KEY=your-key")
-		fmt.Fprintln(os.Stderr, "  4. 安装 Claude Code 并登录（自动复用 OAuth token）")
-		os.Exit(1)
+		// 无 API Key：启动 Setup 引导
+		setupModel := setup.New(XinCodeDir())
+		setupProg := tea.NewProgram(setupModel, tea.WithAltScreen())
+		finalModel, err := setupProg.Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Setup 错误: %s\n", err)
+			os.Exit(1)
+		}
+		result, setupErr := finalModel.(setup.Model).GetResult()
+		if setupErr != nil {
+			fmt.Fprintf(os.Stderr, "配置失败: %s\n", setupErr)
+			os.Exit(1)
+		}
+		if result.APIKey == "" {
+			fmt.Fprintln(os.Stderr, "未完成配置，退出。")
+			os.Exit(0)
+		}
+		// 重新加载配置（刚写入的 settings.json + credentials.json）
+		cfg = LoadConfig()
+		if cfg.APIKey == "" {
+			fmt.Fprintln(os.Stderr, "配置已保存但加载失败，请检查 ~/.xincode/ 目录")
+			os.Exit(1)
+		}
+		authSource = "config"
 	}
 
 	// 创建 Provider
