@@ -85,6 +85,10 @@ type ChatView struct {
 
 	// 工具输出展开状态：true = 所有输出全展开，false = 超阈值自动折叠
 	toolOutputExpanded bool
+
+	// 行号→消息索引映射（点击 toggle 用）
+	// lineToMsg[i] = 绝对行号 i 对应的消息索引（-1 = 间隔行）
+	lineToMsg []int
 }
 
 // newGlamourRenderer 创建白色文字的 Glamour 渲染器
@@ -290,6 +294,23 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.refreshContent(stick)
 	}
 
+	// 鼠标左键点击 toggle 折叠/展开（thinking / tool）
+	if mouseMsg, ok := msg.(tea.MouseMsg); ok && mouseMsg.Type == tea.MouseLeft {
+		absLine := mouseMsg.Y + c.viewport.YOffset
+		if absLine >= 0 && absLine < len(c.lineToMsg) {
+			msgIdx := c.lineToMsg[absLine]
+			if msgIdx >= 0 && msgIdx < len(c.messages) {
+				role := c.messages[msgIdx].Role
+				if role == "thinking" || role == "tool" {
+					c.messages[msgIdx].Folded = !c.messages[msgIdx].Folded
+					c.invalidateCache()
+					c.refreshContent(false)
+					return c, nil
+				}
+			}
+		}
+	}
+
 	// t 键 toggle thinking 折叠/展开（在 viewport 之前拦截）
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "t" {
 		for i := len(c.messages) - 1; i >= 0; i-- {
@@ -385,9 +406,12 @@ func (c *ChatView) invalidateCache() {
 	c.cacheValid = false
 }
 
-// rebuildCommittedCache 重建已提交消息的渲染缓存
+// rebuildCommittedCache 重建已提交消息的渲染缓存，同时构建行号→消息索引映射
 func (c *ChatView) rebuildCommittedCache() {
 	var sb strings.Builder
+	var lineMap []int // 每一行对应的消息索引
+	currentLine := 0
+
 	for i, msg := range c.messages {
 		if i == c.unreadDividerIdx && i > 0 {
 			sb.WriteString("\n\n")
@@ -400,18 +424,33 @@ func (c *ChatView) rebuildCommittedCache() {
 			if sideWidth < 2 {
 				sideWidth = 2
 			}
-			sb.WriteString(divStyle.Render(
-				strings.Repeat("━", sideWidth) + " 新消息 " + strings.Repeat("━", sideWidth)))
+			divider := divStyle.Render(
+				strings.Repeat("━", sideWidth) + " 新消息 " + strings.Repeat("━", sideWidth))
+			sb.WriteString(divider)
+			// 分隔线占的行数（2 个 \n + 分隔线本身）
+			divLines := 2 + strings.Count(divider, "\n") + 1
+			for range divLines {
+				lineMap = append(lineMap, -1)
+			}
+			currentLine += divLines
 		}
 		if i > 0 {
 			sb.WriteString("\n\n")
+			lineMap = append(lineMap, -1, -1) // 两个间隔空行
+			currentLine += 2
 		}
 		rendered := c.renderMessage(msg)
 		if rendered != "" {
 			sb.WriteString(rendered)
+			lineCount := strings.Count(rendered, "\n") + 1
+			for range lineCount {
+				lineMap = append(lineMap, i)
+			}
+			currentLine += lineCount
 		}
 	}
 	c.committedRendered = sb.String()
+	c.lineToMsg = lineMap
 	c.committedMsgCount = len(c.messages)
 	c.committedBlinkSt = c.toolBlink
 	c.cacheValid = true
@@ -780,7 +819,10 @@ func (c *ChatView) renderToolMessage(msg ChatMessage) string {
 	lineCount := len(lines)
 
 	var displayLines []string
-	if !c.toolOutputExpanded && (msg.Folded || lineCount > foldThreshold) {
+	// 折叠逻辑：autoFold XOR 用户手动 toggle（Folded）
+	// 默认 Folded=false：超阈值自动折叠；用户点击后 Folded=true 反转为展开
+	autoFold := lineCount > foldThreshold
+	if !c.toolOutputExpanded && (autoFold != msg.Folded) {
 		// 折叠：显示前 3 行 + 省略提示
 		previewEnd := 3
 		if previewEnd > lineCount {
