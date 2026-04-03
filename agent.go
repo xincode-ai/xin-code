@@ -53,6 +53,38 @@ func NewAgent(p provider.Provider, tools *tool.Registry, cfg *Config, sess *sess
 	}
 }
 
+// RestoreSession 恢复会话运行时状态（/resume 后调用）
+// 同步 session → agent: messages, model, provider 默认模型
+func (a *Agent) RestoreSession() {
+	// 复制 session messages 到独立 slice（避免共享底层数组）
+	a.messages = make([]provider.Message, len(a.session.Messages))
+	copy(a.messages, a.session.Messages)
+
+	// 重置 system-reminder 注入标记 — 下次 Run() 会重新注入
+	a.reminderInjected = false
+
+	// 同步模型到请求配置（req.Model 取自 a.config.Model）
+	if a.session.Model != "" {
+		a.config.Model = a.session.Model
+		// 同步 provider 默认模型（影响 Capabilities 和兜底）
+		a.provider.SetModel(a.session.Model)
+	}
+}
+
+// SyncFromSession 将 session.Messages 同步到 agent.messages（/compact、/clear 后调用）
+// 同时重置 reminderInjected，确保下次 Run() 会重新注入 system-reminder
+func (a *Agent) SyncFromSession() {
+	a.messages = make([]provider.Message, len(a.session.Messages))
+	copy(a.messages, a.session.Messages)
+	a.reminderInjected = false
+}
+
+// CurrentProvider 返回当前 provider 实例（子 Agent 动态读取用）
+func (a *Agent) CurrentProvider() provider.Provider { return a.provider }
+
+// CurrentModel 返回当前模型名（子 Agent 动态读取用）
+func (a *Agent) CurrentModel() string { return a.config.Model }
+
 // Run 执行一轮 Agent 循环（用户消息 -> API -> 工具 -> 循环）
 func (a *Agent) Run(ctx context.Context, userMessage string) {
 	// 追加用户消息
@@ -116,12 +148,14 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 			break
 		}
 
-		// 自动压缩检查
+		// 自动压缩检查（用 session.Messages 避免 system-reminder 污染持久化存储）
 		maxCtx := a.provider.Capabilities().MaxContext
 		if session.NeedsCompact(a.tracker.TotalTokens(), maxCtx) {
-			compacted, msg := session.CompactMessages(a.messages)
-			a.messages = compacted
+			compacted, msg := session.CompactMessages(a.session.Messages)
 			a.session.Messages = compacted
+			a.messages = make([]provider.Message, len(compacted))
+			copy(a.messages, compacted)
+			a.reminderInjected = false // system-reminder 需要重新注入
 			a.send(tui.MsgSystemNotice{Text: "⚡ 已自动压缩: " + msg})
 		}
 
@@ -152,9 +186,11 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 			if isPromptTooLong(retryErr) && !reactiveCompacted {
 				reactiveCompacted = true
 				a.send(tui.MsgSystemNotice{Text: "⚡ 上下文过大 (413)，正在自动压缩后重试..."})
-				compacted, _ := session.CompactMessages(a.messages)
-				a.messages = compacted
+				compacted, _ := session.CompactMessages(a.session.Messages)
 				a.session.Messages = compacted
+				a.messages = make([]provider.Message, len(compacted))
+				copy(a.messages, compacted)
+				a.reminderInjected = false
 				continue // 重新进入循环
 			}
 			a.send(tui.MsgAgentDone{Err: fmt.Errorf("API error: %w", retryErr)})
@@ -168,9 +204,11 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 			if isPromptTooLong(streamErr) && !reactiveCompacted {
 				reactiveCompacted = true
 				a.send(tui.MsgSystemNotice{Text: "⚡ 上下文过大 (413)，正在自动压缩后重试..."})
-				compacted, _ := session.CompactMessages(a.messages)
-				a.messages = compacted
+				compacted, _ := session.CompactMessages(a.session.Messages)
 				a.session.Messages = compacted
+				a.messages = make([]provider.Message, len(compacted))
+				copy(a.messages, compacted)
+				a.reminderInjected = false
 				continue // 重新进入循环
 			}
 			a.send(tui.MsgAgentDone{Err: streamErr})
@@ -254,6 +292,7 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 // processStream 处理流式事件，收集 assistant 消息和工具调用
 func (a *Agent) processStream(events <-chan provider.Event) (provider.Message, []*provider.ToolCall, error) {
 	var textContent string
+	var thinkingContent string
 	var toolCalls []*provider.ToolCall
 	var blocks []provider.ContentBlock
 
@@ -266,6 +305,7 @@ func (a *Agent) processStream(events <-chan provider.Event) (provider.Message, [
 		case provider.EventThinking:
 			if evt.Thinking != nil {
 				a.send(tui.MsgThinking{Text: evt.Thinking.Text})
+				thinkingContent += evt.Thinking.Text
 			}
 
 		case provider.EventToolUse:
@@ -290,12 +330,19 @@ func (a *Agent) processStream(events <-chan provider.Event) (provider.Message, [
 		}
 	}
 
-	// 构建 assistant 消息
-	if textContent != "" {
-		blocks = append([]provider.ContentBlock{
-			{Type: provider.BlockText, Text: textContent},
-		}, blocks...)
+	// 构建 assistant 消息：thinking → text → tool calls
+	var finalBlocks []provider.ContentBlock
+	if thinkingContent != "" {
+		finalBlocks = append(finalBlocks, provider.ContentBlock{
+			Type: provider.BlockThinking, Thinking: thinkingContent,
+		})
 	}
+	if textContent != "" {
+		finalBlocks = append(finalBlocks, provider.ContentBlock{
+			Type: provider.BlockText, Text: textContent,
+		})
+	}
+	blocks = append(finalBlocks, blocks...)
 
 	msg := provider.Message{
 		Role:    provider.RoleAssistant,

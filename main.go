@@ -90,7 +90,13 @@ func main() {
 	// 创建会话
 	workDir, _ := os.Getwd()
 	store := session.NewStore(XinCodeDir())
-	sess := session.NewSession(cfg.Model, workDir)
+	sess := session.NewSession(session.SessionConfig{
+		Model:      cfg.Model,
+		WorkDir:    workDir,
+		Provider:   providerName,
+		BaseURL:    cfg.BaseURL,
+		AuthSource: authSource,
+	})
 
 	// 初始化 MCP 客户端
 	mcpClient := mcp.NewClient()
@@ -158,15 +164,22 @@ func main() {
 	app.OnPluginsList = func() string { return pluginsRegistry.ListString() }
 	app.OnHooksList = func() string { return hooksMgr.ListString() }
 
+	// 前置声明 agent（回调闭包引用，实际创建在后面）
+	var agent *Agent
+
 	// 注入回调
 	app.OnClear = func() {
 		// 清空会话消息
 		sess.Messages = sess.Messages[:0]
 		sess.Turns = 0
+		if agent != nil {
+			agent.SyncFromSession()
+		}
 	}
 	app.OnCompact = func() string {
 		compacted, msg := session.CompactMessages(sess.Messages)
 		sess.Messages = compacted
+		agent.SyncFromSession() // 同步 agent 运行时历史
 		return msg
 	}
 	app.OnExport = func() string {
@@ -189,30 +202,83 @@ func main() {
 		}
 		return "已清除保存的 API Key。\n下次启动将重新进入配置向导。"
 	}
-	app.OnResume = func() string {
+	app.OnResume = func() ([]tui.ResumeEntry, error) {
 		entries, err := store.List(workDir)
 		if err != nil {
-			return fmt.Sprintf("获取历史会话失败: %s", err)
+			return nil, err
 		}
-		if len(entries) == 0 {
-			return "当前目录没有历史会话"
+		result := make([]tui.ResumeEntry, 0, len(entries))
+		for _, e := range entries {
+			mode, reason := classifyResumeCompat(e, providerName, cfg.BaseURL, authSource)
+			result = append(result, tui.ResumeEntry{
+				ID:         e.ID,
+				Model:      e.Model,
+				Provider:   e.Provider,
+				BaseURL:    e.BaseURL,
+				AuthSource: e.AuthSource,
+				Turns:      e.Turns,
+				Cost:       fmt.Sprintf("$%.4f", e.CostUSD),
+				Mode:       mode,
+				ModeReason: reason,
+			})
 		}
-		var sb []string
-		sb = append(sb, "📋 历史会话:\n")
-		for i, e := range entries {
-			if i >= 10 {
-				sb = append(sb, fmt.Sprintf("  ... 还有 %d 个会话", len(entries)-10))
-				break
+		return result, nil
+	}
+	app.OnResumeLoad = func(sessionID string) error {
+		loaded, err := store.Load(sessionID)
+		if err != nil {
+			return err
+		}
+
+		// ── 0. 兼容性检查 ──
+		// 优先使用 session 持久化的 provider，旧会话缺失时降级到模型名推断
+		loadedProvider := loaded.Provider
+		if loadedProvider == "" {
+			loadedProvider = provider.ResolveProviderName(loaded.Model)
+		}
+		if loadedProvider != providerName {
+			return fmt.Errorf("该会话使用 %s (%s)，当前运行 %s (%s)，暂不支持跨 provider 恢复",
+				loaded.Model, loadedProvider, cfg.Model, providerName)
+		}
+		// BaseURL 不一致也阻止（自定义 endpoint 不能混用）
+		loadedBaseURL := loaded.BaseURL
+		if loadedBaseURL != cfg.BaseURL {
+			if loadedBaseURL != "" || cfg.BaseURL != "" {
+				return fmt.Errorf("该会话使用 endpoint %q，当前运行 %q，暂不支持跨 endpoint 恢复",
+					loadedBaseURL, cfg.BaseURL)
 			}
-			sb = append(sb, fmt.Sprintf("  %d. [%s] %s | %d 轮 | $%.4f",
-				i+1, e.ID, e.Model, e.Turns, e.CostUSD))
 		}
-		sb = append(sb, "\n暂不支持交互式选择恢复，功能开发中")
-		result := ""
-		for _, s := range sb {
-			result += s + "\n"
-		}
-		return result
+		// AuthSource 不兼容时，selector 已在 Enter 处设 readOnly=true
+		// OnResumeLoad 本身不阻止——加载 transcript 是安全的，只是不应发新请求
+		// 若未来有绕过 selector 的调用路径（如 CLI --resume），需在此处增加 authSource 检查
+
+		// ── 1. 恢复 Session 真源 ──
+		sess.Messages = loaded.Messages
+		sess.Turns = loaded.Turns
+		sess.ID = loaded.ID
+		sess.CreatedAt = loaded.CreatedAt
+		sess.TotalInputTokens = loaded.TotalInputTokens
+		sess.TotalOutputTokens = loaded.TotalOutputTokens
+		sess.TotalCostUSD = loaded.TotalCostUSD
+		sess.Model = loaded.Model
+		sess.Provider = loaded.Provider
+		sess.BaseURL = loaded.BaseURL
+		sess.AuthSource = loaded.AuthSource
+
+		// ── 2. 同步 Agent 运行时（关键：让后续请求用恢复后的历史和模型）──
+		agent.RestoreSession()
+
+		// ── 3. 同步 TUI 状态栏 / tracker ──
+		tracker.Reset()
+		tracker.SetModel(loaded.Model)
+		tracker.AddUsage(loaded.TotalInputTokens, loaded.TotalOutputTokens, 0, 0)
+		app.SetModel(loaded.Model)
+		app.SessionID = loaded.ID
+		app.SessionTurns = loaded.Turns
+
+		// ── 4. 从 session.Messages 重建前台 transcript（含真实 tool 结果）──
+		app.RestoreTranscript(rebuildTranscript(loaded.Messages))
+		return nil
 	}
 
 	var runMu sync.Mutex
@@ -262,20 +328,30 @@ func main() {
 				return confirmed, nil
 			}
 		},
-		Provider:    p,
-		Permission:  permChecker,
-		Tracker:     tracker,
-		MaxTokens:   cfg.MaxTokens,
-		Model:       cfg.Model,
-		SendMsg:     sendMsg,
-		SubAgentReg: subAgentReg,
+		CurrentProvider: func() provider.Provider {
+			if agent != nil {
+				return agent.CurrentProvider()
+			}
+			return p
+		},
+		CurrentModel: func() string {
+			if agent != nil {
+				return agent.CurrentModel()
+			}
+			return cfg.Model
+		},
+		Permission:      permChecker,
+		Tracker:         tracker,
+		MaxTokens:       cfg.MaxTokens,
+		SendMsg:         sendMsg,
+		SubAgentReg:     subAgentReg,
 	})
 
 	// MCP 工具注册
 	mcpClient.RegisterToRegistry(tools)
 
-	// 创建 Agent
-	agent := NewAgent(p, tools, cfg, sess, store, tracker, func(msg interface{}) {
+	// 创建 Agent（前置声明在回调注入前）
+	agent = NewAgent(p, tools, cfg, sess, store, tracker, func(msg interface{}) {
 		if m, ok := msg.(tea.Msg); ok {
 			app.Send(m)
 		}
@@ -303,13 +379,12 @@ func main() {
 	// 启动 TUI
 	// 预设终端背景色检测，避免 Lipgloss OSC 查询导致 ANSI 响应泄漏到输入框
 	os.Setenv("GLAMOUR_STYLE", "dark")
-	// SGR 鼠标转义序列片段：ESC 被拆到前一次读取，剩余 [<数字;数字;数字M 泄漏为 KeyMsg
-	// Claude Code 有同样问题，用正则过滤：/^\[<\d+;\d+;\d+[Mm]/
+	// SGR 鼠标转义序列片段：动态鼠标模式下仍可能泄漏
 	sgrMouseRe := regexp.MustCompile(`^\[<\d+;\d+;\d+[Mm]`)
 
 	prog := tea.NewProgram(app,
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(), // 鼠标滚轮滚动；Option+拖拽选择文本
+		tea.WithMouseCellMotion(), // 默认浏览模式：启用鼠标，支持滚轮滚动（Ctrl+Y 切到复制模式）
 		tea.WithFilter(func(m tea.Model, msg tea.Msg) tea.Msg {
 			if keyMsg, ok := msg.(tea.KeyMsg); ok {
 				s := keyMsg.String()
@@ -331,7 +406,138 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 退出前保存会话和关闭 MCP
-	_ = store.Save(sess)
+	// 退出前保存会话（只读浏览模式下跳过，防止误修改被持久化）
+	if !app.IsReadOnly() {
+		_ = store.Save(sess)
+	}
 	mcpClient.Close()
+}
+
+// rebuildTranscript 从 session messages 重建前台 transcript
+// 关键改进：用真实 tool 结果替代占位文本，跳过 system-reminder 和 compact summary
+func rebuildTranscript(messages []provider.Message) []tui.ChatMessage {
+	// 建 toolID → result 映射（tool result 在 RoleUser 消息的 BlockToolResult 块中）
+	toolResults := make(map[string]*provider.ToolResult)
+	for _, msg := range messages {
+		for _, block := range msg.Content {
+			if block.Type == provider.BlockToolResult && block.ToolResult != nil {
+				toolResults[block.ToolResult.ToolUseID] = block.ToolResult
+			}
+		}
+	}
+
+	var chatMsgs []tui.ChatMessage
+	for _, msg := range messages {
+		switch msg.Role {
+		case provider.RoleUser:
+			// 跳过 tool result 消息（它们会内联显示在 tool call 下方）
+			isToolResult := false
+			for _, block := range msg.Content {
+				if block.Type == provider.BlockToolResult {
+					isToolResult = true
+					break
+				}
+			}
+			if isToolResult {
+				continue
+			}
+
+			text := msg.TextContent()
+			if text == "" {
+				continue
+			}
+			// 跳过 system-reminder 注入消息
+			if strings.HasPrefix(text, "<system-reminder>") {
+				continue
+			}
+			// compact summary → 显示为系统提示
+			if strings.HasPrefix(text, "[上下文摘要]") {
+				chatMsgs = append(chatMsgs, tui.ChatMessage{
+					Role:    "system",
+					Content: "⚡ 上下文已压缩",
+				})
+				continue
+			}
+
+			chatMsgs = append(chatMsgs, tui.ChatMessage{
+				Role:    "user",
+				Content: text,
+			})
+
+		case provider.RoleAssistant:
+			// 恢复 thinking blocks
+			for _, block := range msg.Content {
+				if block.Type == provider.BlockThinking && block.Thinking != "" {
+					chatMsgs = append(chatMsgs, tui.ChatMessage{
+						Role:    "thinking",
+						Content: block.Thinking,
+						Folded:  true,
+					})
+				}
+			}
+			text := msg.TextContent()
+			// 跳过 compact placeholder 回复
+			if text == "已加载上下文摘要，继续当前任务。" {
+				continue
+			}
+			if text != "" {
+				chatMsgs = append(chatMsgs, tui.ChatMessage{
+					Role:    "assistant",
+					Content: text,
+				})
+			}
+			// 恢复 tool call + 真实 result
+			for _, call := range msg.ToolCalls() {
+				content := "(已恢复)"
+				isError := false
+				folded := true
+				if result, ok := toolResults[call.ID]; ok {
+					content = result.Content
+					isError = result.IsError
+					// 短输出不折叠
+					if strings.Count(content, "\n") <= 8 {
+						folded = false
+					}
+				}
+				chatMsgs = append(chatMsgs, tui.ChatMessage{
+					Role:      "tool",
+					ToolName:  call.Name,
+					ToolID:    call.ID,
+					ToolInput: call.Input,
+					Content:   content,
+					IsError:   isError,
+					Folded:    folded,
+				})
+			}
+		}
+	}
+	return chatMsgs
+}
+
+// classifyResumeCompat 判断历史会话与当前运行环境的兼容性
+// 返回 (ResumeMode, 原因文案)
+func classifyResumeCompat(e session.IndexEntry, curProvider, curBaseURL, curAuthSource string) (tui.ResumeMode, string) {
+	// provider 推断（兼容旧 session 无 Provider 字段）
+	entryProvider := e.Provider
+	if entryProvider == "" {
+		entryProvider = provider.ResolveProviderName(e.Model)
+	}
+
+	// 跨 provider → blocked
+	if entryProvider != curProvider {
+		return tui.ResumeBlocked, tui.ReasonProviderBlock
+	}
+
+	// 跨 endpoint → blocked
+	if e.BaseURL != curBaseURL {
+		return tui.ResumeBlocked, tui.ReasonEndpointBlock
+	}
+
+	// authSource 不兼容 → readonly
+	// 空 authSource（旧会话）与任何当前 authSource 视为兼容
+	if e.AuthSource != "" && curAuthSource != "" && e.AuthSource != curAuthSource {
+		return tui.ResumeReadonly, tui.ReasonAuthMismatch
+	}
+
+	return tui.ResumeContinue, tui.ReasonCompatible
 }
