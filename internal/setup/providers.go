@@ -1,5 +1,11 @@
 package setup
 
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+)
+
 // ProviderInfo 预置 Provider 信息
 type ProviderInfo struct {
 	ID          string   // "anthropic", "openai", "openrouter", "custom"
@@ -56,4 +62,30 @@ var BuiltinProviders = []ProviderInfo{
 		EnvKey:      "",
 		Models:      []string{},
 	},
+}
+
+// SaveGlobalSettings 写入/合并全局设置到 settings.json
+// fields 是需要更新的 key-value 对
+func SaveGlobalSettings(path string, fields map[string]string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+
+	// 读取现有配置
+	existing := make(map[string]any)
+	if data, err := os.ReadFile(path); err == nil {
+		json.Unmarshal(data, &existing)
+	}
+
+	// 合并新字段
+	for k, v := range fields {
+		existing[k] = v
+	}
+
+	data, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
 }
