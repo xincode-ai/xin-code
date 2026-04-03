@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	agentRetry "github.com/xincode-ai/xin-code/internal/agent"
@@ -89,6 +90,7 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 	}
 
 	turns := 0
+	reactiveCompacted := false // 413 自动压缩最多触发一次，避免无限循环
 	for {
 		turns++
 		if turns > a.config.MaxTurns {
@@ -127,6 +129,15 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 			return err
 		})
 		if retryErr != nil {
+			// Reactive Compact：413 prompt-too-long 时自动压缩并重试
+			if isPromptTooLong(retryErr) && !reactiveCompacted {
+				reactiveCompacted = true
+				a.send(tui.MsgSystemNotice{Text: "⚡ 上下文过大 (413)，正在自动压缩后重试..."})
+				compacted, _ := session.CompactMessages(a.messages)
+				a.messages = compacted
+				a.session.Messages = compacted
+				continue // 重新进入循环
+			}
 			a.send(tui.MsgAgentDone{Err: fmt.Errorf("API error: %w", retryErr)})
 			return
 		}
@@ -134,6 +145,15 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 		// 处理流式事件
 		assistantMsg, toolCalls, streamErr := a.processStream(events)
 		if streamErr != nil {
+			// Reactive Compact：流式过程中收到 413 时自动压缩并重试
+			if isPromptTooLong(streamErr) && !reactiveCompacted {
+				reactiveCompacted = true
+				a.send(tui.MsgSystemNotice{Text: "⚡ 上下文过大 (413)，正在自动压缩后重试..."})
+				compacted, _ := session.CompactMessages(a.messages)
+				a.messages = compacted
+				a.session.Messages = compacted
+				continue // 重新进入循环
+			}
 			a.send(tui.MsgAgentDone{Err: streamErr})
 			return
 		}
@@ -264,6 +284,23 @@ func (a *Agent) processStream(events <-chan provider.Event) (provider.Message, [
 	}
 
 	return msg, toolCalls, nil
+}
+
+// isPromptTooLong 检测错误是否为 413 prompt-too-long（上下文超限）
+func isPromptTooLong(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// 检测 HTTP 413 状态码
+	if strings.Contains(msg, "413") {
+		return true
+	}
+	// 检测 Anthropic 的 prompt_too_long 错误消息
+	if strings.Contains(msg, "prompt is too long") || strings.Contains(msg, "prompt_too_long") {
+		return true
+	}
+	return false
 }
 
 // saveSession 保存会话到存储
