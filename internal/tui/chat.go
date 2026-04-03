@@ -580,9 +580,14 @@ func (c *ChatView) renderMessage(msg ChatMessage) string {
 			return header
 		}
 
-		// 展开态：header + 完整内容
+		// 展开态：header + 完整内容（限宽自动换行）
 		header := symStyle.Render(SymThinking) + StyleThinking.Render(" Thinking") + countStr
-		bodyStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Italic(true)
+		// 内容区宽度 = 终端宽度 - wrapMessageResponse 前缀缩进（约 6 列）
+		bodyWidth := c.width - 6
+		if bodyWidth < 20 {
+			bodyWidth = 20
+		}
+		bodyStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Italic(true).Width(bodyWidth)
 		body := bodyStyle.Render(msg.Content)
 		return header + "\n" + wrapMessageResponse(body)
 
