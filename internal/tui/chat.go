@@ -162,6 +162,24 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.streaming = false
 		c.refreshContent(true)
 
+	case MsgSubAgentStart:
+		stick := c.shouldAutoScroll()
+		c.messages = append(c.messages, ChatMessage{
+			Role:    "subagent-start",
+			ToolID:  msg.ID,
+			Content: msg.Description,
+		})
+		c.refreshContent(stick)
+
+	case MsgSubAgentDone:
+		stick := c.shouldAutoScroll()
+		c.messages = append(c.messages, ChatMessage{
+			Role:    "subagent-done",
+			ToolID:  msg.ID,
+			Content: msg.Description + "\n" + msg.Result,
+		})
+		c.refreshContent(stick)
+
 	case MsgError:
 		stick := c.shouldAutoScroll()
 		c.messages = append(c.messages, ChatMessage{
@@ -288,6 +306,29 @@ func (c *ChatView) renderMessage(msg ChatMessage) string {
 
 	case "tool":
 		return c.renderToolMessage(msg)
+
+	case "subagent-start":
+		// ⏺ Agent: {description}（品牌色）
+		marker := lipgloss.NewStyle().Foreground(ColorBrand).Render(BlackCircle())
+		label := lipgloss.NewStyle().Foreground(ColorBrand).Bold(true).Render("Agent")
+		desc := StyleDim.Render(msg.Content)
+		return marker + " " + label + ": " + desc
+
+	case "subagent-done":
+		// ⎿ Agent 完成: {result 摘要}
+		parts := strings.SplitN(msg.Content, "\n", 2)
+		desc := parts[0]
+		result := ""
+		if len(parts) > 1 {
+			result = parts[1]
+		}
+		marker := lipgloss.NewStyle().Foreground(ColorSuccess).Render(BlackCircle())
+		label := lipgloss.NewStyle().Foreground(ColorSuccess).Bold(true).Render("Agent 完成")
+		header := marker + " " + label + ": " + StyleDim.Render(desc)
+		if result != "" {
+			return header + "\n" + wrapMessageResponse(StyleToolOutput.Render(result))
+		}
+		return header
 
 	case "system":
 		return StyleDim.Render(msg.Content)

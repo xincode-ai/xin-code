@@ -170,7 +170,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case MsgTextDelta, MsgThinking, MsgToolStart, MsgToolDone,
 		MsgUsage, MsgResponseDone, MsgAgentDone,
 		MsgPermissionRequest, MsgDiffPreview, MsgAskUser, MsgError,
-		MsgSystemNotice:
+		MsgSystemNotice, MsgSubAgentStart, MsgSubAgentDone:
 		a.waitingForEvent = false
 	}
 
@@ -340,6 +340,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.askResponseCh = msg.Response
 		a.chat.AddSystemMessage("需要你补充输入：\n" + msg.Question)
 		cmds = append(cmds, a.input.Focus())
+		return a, tea.Batch(cmds...)
+
+	case MsgSubAgentStart:
+		a.chat, _ = a.chat.Update(msg)
+		cmds = append(cmds, a.safeWaitForEvent())
+		return a, tea.Batch(cmds...)
+
+	case MsgSubAgentDone:
+		a.chat, _ = a.chat.Update(msg)
+		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
 
 	case MsgSystemNotice:

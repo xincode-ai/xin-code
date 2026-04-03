@@ -83,6 +83,19 @@ type MsgSystemNotice struct {
 	Text string
 }
 
+// MsgSubAgentStart 子 agent 开始执行
+type MsgSubAgentStart struct {
+	ID          string
+	Description string
+}
+
+// MsgSubAgentDone 子 agent 执行完成
+type MsgSubAgentDone struct {
+	ID          string
+	Description string
+	Result      string // 摘要（截取前 200 字符）
+}
+
 // MsgWindowSize 窗口大小变化
 type MsgWindowSize struct {
 	Width  int
