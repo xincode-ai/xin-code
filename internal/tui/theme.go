@@ -2,226 +2,128 @@ package tui
 
 import (
 	"os"
+	"runtime"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
 func init() {
 	// 预设暗色背景，避免 Lipgloss 在运行时查询终端背景色（OSC 11），
-	// 查询的响应会被 Bubbletea 的 stdin reader 捕获并泄漏到输入框。
+	// 查询响应会被 Bubble Tea 的输入读取器误收到。
 	lipgloss.SetHasDarkBackground(true)
 
-	// 同时通过环境变量强制 Lipgloss 跳过终端检测
-	// （某些版本的 lipgloss 不支持 SetHasDarkBackground）
+	// 同时强制启用彩色输出，避免在部分终端里回退到纯文本样式。
 	os.Setenv("CLICOLOR_FORCE", "1")
 }
 
-// 品牌色系
-var (
-	// 主色调
-	ColorBrand   = lipgloss.Color("#7C3AED") // 紫色品牌色
-	ColorAccent  = lipgloss.Color("#06B6D4") // 青色点缀
+// BlackCircle 返回平台对应的实心圆符号（macOS 用 Unicode 录制键符号）
+func BlackCircle() string {
+	if runtime.GOOS == "darwin" {
+		return "⏺"
+	}
+	return "●"
+}
 
-	// 语义色
-	ColorSuccess = lipgloss.Color("#22C55E") // 绿色
-	ColorWarning = lipgloss.Color("#EAB308") // 黄色
-	ColorError   = lipgloss.Color("#EF4444") // 红色
-	ColorInfo    = lipgloss.Color("#3B82F6") // 蓝色
-
-	// 文本色
-	ColorText     = lipgloss.Color("#E2E8F0") // 浅灰文本
-	ColorTextDim  = lipgloss.Color("#64748B") // 暗灰辅助文本
-	ColorTextBold = lipgloss.Color("#F8FAFC") // 高亮文本
-
-	// 背景色
-	ColorBg       = lipgloss.Color("#0F172A") // 深色背景
-	ColorBgAlt    = lipgloss.Color("#1E293B") // 交替背景
-
-	// 上下文进度条颜色
-	ColorCtxLow  = lipgloss.Color("#22C55E") // <60% 绿色
-	ColorCtxMid  = lipgloss.Color("#EAB308") // 60-80% 黄色
-	ColorCtxHigh = lipgloss.Color("#EF4444") // >80% 红色
+// CC 符号体系
+const (
+	SymThinking   = "∴"
+	SymResponse   = "⎿"
+	SymPause      = "⏸"
+	SymUserPrompt = "❯"
 )
 
-// 样式定义
+// 颜色令牌（CC dark theme 精确 RGB）
 var (
-	StyleBrand = lipgloss.NewStyle().
-		Foreground(ColorBrand).
-		Bold(true)
+	// 品牌色
+	ColorBrand      = lipgloss.Color("#D77757") // CC: rgb(215,119,87)
+	ColorBrandDim   = lipgloss.Color("#EB9F7F") // CC: rgb(235,159,127) 闪烁态
 
-	StyleModel = lipgloss.NewStyle().
-		Foreground(ColorAccent)
+	// 语义色
+	ColorSuccess = lipgloss.Color("#2CB74F")
+	ColorError   = lipgloss.Color("#CC3333")
+	ColorWarning = lipgloss.Color("#DCA032")
+	ColorPerm    = lipgloss.Color("#B1B9F9") // CC: rgb(177,185,249) 权限蓝紫
 
-	StyleCost = lipgloss.NewStyle().
-		Foreground(ColorWarning)
+	// 文本色
+	ColorText    = lipgloss.Color("#FFFFFF")
+	ColorTextDim = lipgloss.Color("#A0A0A0")
+	ColorSubtle  = lipgloss.Color("#6E6E6E")
 
-	// 对话区域
-	StyleUserMsg = lipgloss.NewStyle().
-		Foreground(ColorTextBold).
-		Bold(true)
+	// 边框色
+	ColorInputBorder = lipgloss.Color("#888888") // CC: rgb(136,136,136)
 
-	StyleUserPrefix = lipgloss.NewStyle().
-		Foreground(ColorBrand).
-		Bold(true)
+	// Diff 色
+	ColorDiffAdd = lipgloss.Color("#4ADE80")
+	ColorDiffDel = lipgloss.Color("#FB7185")
 
-	StyleAIMsg = lipgloss.NewStyle().
-		Foreground(ColorText)
+	// 上下文进度条
+	ColorCtxLow  = lipgloss.Color("#34D399")
+	ColorCtxMid  = lipgloss.Color("#F59E0B")
+	ColorCtxHigh = lipgloss.Color("#F87171")
+)
 
+// 组件样式
+var (
+	// ⎿ 前缀及 assistant 响应区文本
+	StyleMsgResponse = lipgloss.NewStyle().
+				Foreground(ColorTextDim)
+
+	// 用户输入文本
+	StyleUserText = lipgloss.NewStyle().
+			Foreground(ColorText).
+			Bold(true)
+
+	// ∴ 思考中文本
 	StyleThinking = lipgloss.NewStyle().
-		Foreground(ColorTextDim).
-		Italic(true)
+			Foreground(ColorTextDim).
+			Italic(true)
 
-	// 工具相关
+	// 工具名称
 	StyleToolName = lipgloss.NewStyle().
-		Foreground(ColorAccent).
-		Bold(true)
+			Bold(true)
 
-	StyleToolRunning = lipgloss.NewStyle().
-		Foreground(ColorInfo)
-
-	StyleToolSuccess = lipgloss.NewStyle().
-		Foreground(ColorSuccess)
-
-	StyleToolError = lipgloss.NewStyle().
-		Foreground(ColorError)
-
+	// 工具输出内容
 	StyleToolOutput = lipgloss.NewStyle().
-		Foreground(ColorTextDim)
+			Foreground(ColorTextDim)
 
-	// 权限对话框
-	StylePermBox = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorWarning).
-		Padding(0, 1)
+	// 错误文本
+	StyleError = lipgloss.NewStyle().
+			Foreground(ColorError)
 
+	// Spinner 动画
+	StyleSpinner = lipgloss.NewStyle().
+			Foreground(ColorBrand)
+
+	// 通用 dim 文本
+	StyleDim = lipgloss.NewStyle().
+			Foreground(ColorTextDim)
+
+	// 输入框提示符
+	StyleInputPrompt = lipgloss.NewStyle().
+				Foreground(ColorTextDim)
+
+	// 权限请求标题
 	StylePermTitle = lipgloss.NewStyle().
-		Foreground(ColorWarning).
-		Bold(true)
+			Foreground(ColorPerm).
+			Bold(true)
 
-	// Diff 预览
+	// Diff 样式
 	StyleDiffAdd = lipgloss.NewStyle().
-		Foreground(ColorSuccess)
+			Foreground(ColorDiffAdd)
 
 	StyleDiffDel = lipgloss.NewStyle().
-		Foreground(ColorError)
-
-	StyleDiffCtx = lipgloss.NewStyle().
-		Foreground(ColorTextDim)
+			Foreground(ColorDiffDel)
 
 	StyleDiffHeader = lipgloss.NewStyle().
-		Foreground(ColorInfo).
-		Bold(true)
+				Foreground(ColorPerm).
+				Bold(true)
 
-	// 输入框
-	StyleInputBorder = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorBrand).
-		Padding(0, 1)
+	StyleDiffCtx = lipgloss.NewStyle().
+			Foreground(ColorTextDim)
 
-	StyleInputPrompt = lipgloss.NewStyle().
-		Foreground(ColorBrand).
-		Bold(true)
-
-	// 辅助文本
-	StyleTextDim = lipgloss.NewStyle().
-		Foreground(ColorTextDim)
-
-	// 提示文本
-	StyleHint = lipgloss.NewStyle().
-		Foreground(ColorTextDim)
-
-	// 错误消息
-	StyleErrorMsg = lipgloss.NewStyle().
-		Foreground(ColorError).
-		Bold(true)
-
-	// ========== 边框与分隔样式 ==========
-
-	// 主边框（区域分隔）
-	StyleBorder = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorBgAlt).
-		Foreground(ColorText)
-
-	// 标题边框
-	StyleTitleBorder = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(ColorBrand).
-		BorderTop(true).
-		BorderBottom(false).
-		BorderLeft(false).
-		BorderRight(false)
-
-	// 分隔线（水平）
-	StyleSeparator = lipgloss.NewStyle().
-		Foreground(ColorBgAlt)
-
-	// 分割线字符
-	SeparatorChar = "─"
-	SeparatorDouble = "═"
-
-	// 消息块边框
-	StyleUserBlock = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorBrand).
-		BorderTop(false).
-		BorderBottom(false).
-		BorderLeft(true).
-		BorderRight(false).
-		Padding(0, 0, 0, 1)
-
-	StyleAssistantBlock = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorAccent).
-		BorderTop(false).
-		BorderBottom(false).
-		BorderLeft(true).
-		BorderRight(false).
-		Padding(0, 0, 0, 1)
-
-	// 工具调用块
-	StyleToolBlock = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(ColorBgAlt).
-		BorderTop(false).
-		BorderBottom(false).
-		BorderLeft(true).
-		BorderRight(false).
-		Padding(0, 0, 0, 1)
-
-	// 状态栏样式（带边框）
-	StyleStatusBar = lipgloss.NewStyle().
-		Background(ColorBgAlt).
-		Foreground(ColorText).
-		Border(lipgloss.NormalBorder()).
-		BorderBottom(true).
-		BorderForeground(ColorBgAlt).
-		Padding(0, 1)
-
-	// 输入区边框
-	StyleInputFrame = lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(ColorBrand).
-		BorderTop(true).
-		BorderBottom(false).
-		BorderLeft(true).
-		BorderRight(true).
-		Padding(1, 1, 0, 1)
-
-	// 角标（左上角）
-	StyleCorner = lipgloss.NewStyle().
-		Foreground(ColorTextDim)
-
-	// 标签（用于小标签）
-	StyleTag = lipgloss.NewStyle().
-		Foreground(ColorTextDim).
-		Background(ColorBgAlt).
-		Padding(0, 1)
-
-	StyleTagBrand = lipgloss.NewStyle().
-		Foreground(ColorBrand).
-		Background(ColorBgAlt).
-		Padding(0, 1)
+	// Footer 通用样式
+	StyleFooter = lipgloss.NewStyle().
+			Foreground(ColorTextDim)
 )
 
 // ContextColor 根据上下文使用百分比返回对应颜色

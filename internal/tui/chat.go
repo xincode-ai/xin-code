@@ -8,24 +8,28 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
+	styles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 )
 
 // 折叠阈值：超过此行数的工具输出自动折叠
 const foldThreshold = 8
 
-// ChatMessage 单条消息
+// msgResponsePrefix CC 风格缩进前缀
+const msgResponsePrefix = " " + SymResponse + " "
+
+// ChatMessage 单条转录消息
 type ChatMessage struct {
-	Role      string // "user" / "assistant" / "tool" / "thinking" / "error" / "system"
+	Role      string // 用户 / 助手 / 工具 / 思考 / 错误 / 系统
 	Content   string
 	ToolName  string // 工具消息时使用
-	ToolID    string // 工具调用 ID（用于精确匹配同名工具）
-	ToolInput string // 工具输入参数 (raw JSON)
+	ToolID    string // 工具调用标识（用于精确匹配同名工具）
+	ToolInput string // 工具输入参数（原始 JSON）
 	IsError   bool
 	Folded    bool // 是否已折叠
 }
 
-// ChatView 对话区域组件
+// ChatView 转录区域组件
 type ChatView struct {
 	viewport viewport.Model
 	messages []ChatMessage
@@ -33,29 +37,43 @@ type ChatView struct {
 	height   int
 
 	// 流式状态
-	streaming      bool
-	streamBuf      string
-	streamToolName string // 当前正在执行的工具名
+	streaming bool
+	streamBuf string
 
-	// Glamour 渲染器
+	// 工具闪烁状态，配合 MsgSpinnerTick 交替
+	toolBlink bool
+
+	// Markdown 渲染器
 	renderer *glamour.TermRenderer
 }
 
-// NewChatView 创建对话区域
+// newGlamourRenderer 创建白色文字的 Glamour 渲染器
+func newGlamourRenderer(width int) *glamour.TermRenderer {
+	// 基于 dark 主题，覆盖 Document 前景色为白色
+	style := styles.DarkStyleConfig
+	white := "#FFFFFF"
+	style.Document.Color = &white
+	style.Paragraph.Color = &white
+
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithStyles(style),
+		glamour.WithWordWrap(max(20, width-4)),
+	)
+	return r
+}
+
+// NewChatView 创建转录区域
 func NewChatView(width, height int) ChatView {
 	vp := viewport.New(width, height)
 	vp.Style = lipgloss.NewStyle()
-
-	renderer, _ := glamour.NewTermRenderer(
-		glamour.WithStylePath("dark"),
-		glamour.WithWordWrap(width-6),
-	)
+	vp.MouseWheelEnabled = true
+	vp.MouseWheelDelta = 3
 
 	return ChatView{
 		viewport: vp,
 		width:    width,
 		height:   height,
-		renderer: renderer,
+		renderer: newGlamourRenderer(width),
 	}
 }
 
@@ -70,20 +88,24 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.height = msg.Height
 		c.viewport.Width = msg.Width
 		c.viewport.Height = msg.Height
-		c.renderer, _ = glamour.NewTermRenderer(
-			glamour.WithStylePath("dark"),
-			glamour.WithWordWrap(msg.Width-6),
-		)
-		c.refreshContent()
+		c.renderer = newGlamourRenderer(msg.Width)
+		c.refreshContent(c.shouldAutoScroll())
+
+	case MsgSpinnerTick:
+		// 只在有执行中工具时才刷新（避免无意义的全量重渲染导致闪烁）
+		c.toolBlink = !c.toolBlink
+		if c.hasInProgressTools() {
+			c.refreshContent(c.shouldAutoScroll())
+		}
 
 	case MsgTextDelta:
+		stick := c.shouldAutoScroll()
 		c.streaming = true
 		c.streamBuf += msg.Text
-		c.refreshContent()
-		c.viewport.GotoBottom()
+		c.refreshContent(stick)
 
 	case MsgThinking:
-		// 合并连续的 thinking 消息为一条，避免冗长显示
+		stick := c.shouldAutoScroll()
 		if len(c.messages) > 0 && c.messages[len(c.messages)-1].Role == "thinking" {
 			c.messages[len(c.messages)-1].Content += msg.Text
 		} else {
@@ -92,23 +114,21 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 				Content: msg.Text,
 			})
 		}
-		c.refreshContent()
-		c.viewport.GotoBottom()
+		c.refreshContent(stick)
 
 	case MsgToolStart:
-		c.streamToolName = msg.Name
+		stick := c.shouldAutoScroll()
 		c.messages = append(c.messages, ChatMessage{
 			Role:      "tool",
 			ToolName:  msg.Name,
 			ToolID:    msg.ID,
 			ToolInput: msg.Input,
-			Content:   "执行中...",
+			Content:   "", // 空内容表示执行中
 		})
-		c.refreshContent()
-		c.viewport.GotoBottom()
+		c.refreshContent(stick)
 
 	case MsgToolDone:
-		c.streamToolName = ""
+		stick := c.shouldAutoScroll()
 		for i := len(c.messages) - 1; i >= 0; i-- {
 			if c.messages[i].Role == "tool" && c.messages[i].ToolID == msg.ID {
 				c.messages[i].Content = msg.Output
@@ -119,10 +139,10 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 				break
 			}
 		}
-		c.refreshContent()
-		c.viewport.GotoBottom()
+		c.refreshContent(stick)
 
 	case MsgResponseDone:
+		stick := c.shouldAutoScroll()
 		if c.streamBuf != "" {
 			c.messages = append(c.messages, ChatMessage{
 				Role:    "assistant",
@@ -130,8 +150,7 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			})
 			c.streamBuf = ""
 			c.streaming = false
-			c.refreshContent()
-			c.viewport.GotoBottom()
+			c.refreshContent(stick)
 		}
 
 	case MsgSubmit:
@@ -141,16 +160,15 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		})
 		c.streamBuf = ""
 		c.streaming = false
-		c.refreshContent()
-		c.viewport.GotoBottom()
+		c.refreshContent(true)
 
 	case MsgError:
+		stick := c.shouldAutoScroll()
 		c.messages = append(c.messages, ChatMessage{
 			Role:    "error",
 			Content: msg.Err.Error(),
 		})
-		c.refreshContent()
-		c.viewport.GotoBottom()
+		c.refreshContent(stick)
 	}
 
 	c.viewport, cmd = c.viewport.Update(msg)
@@ -161,140 +179,219 @@ func (c ChatView) View() string {
 	return c.viewport.View()
 }
 
-// refreshContent 重新渲染所有消息到 viewport
-func (c *ChatView) refreshContent() {
+// AddSystemMessage 添加系统消息
+func (c *ChatView) AddSystemMessage(text string) {
+	c.messages = append(c.messages, ChatMessage{
+		Role:    "system",
+		Content: text,
+	})
+	c.refreshContent(true)
+}
+
+// Clear 清空消息
+func (c *ChatView) Clear() {
+	c.messages = nil
+	c.streamBuf = ""
+	c.streaming = false
+	c.refreshContent(true)
+}
+
+// HasMessages 返回是否有用户发起的消息（非 system 消息）
+func (c ChatView) HasMessages() bool {
+	for _, m := range c.messages {
+		if m.Role != "system" {
+			return true
+		}
+	}
+	return c.streaming
+}
+
+// refreshContent 重新渲染所有消息到可滚动视口
+func (c *ChatView) refreshContent(stickToBottom bool) {
 	var sb strings.Builder
 
 	for i, msg := range c.messages {
-		// 用户消息和 assistant 消息前增加空行，提供视觉层次
-		if i > 0 && (msg.Role == "user" || msg.Role == "assistant") {
-			sb.WriteString("\n")
+		if i > 0 {
+			sb.WriteString("\n\n")
 		}
 		rendered := c.renderMessage(msg)
 		if rendered != "" {
 			sb.WriteString(rendered)
-			sb.WriteString("\n")
 		}
 	}
 
-	// 流式接收中的 AI 回复（CC 风格：● 前缀 + 光标）
 	if c.streaming && c.streamBuf != "" {
-		sb.WriteString("\n")
-		sb.WriteString(StyleToolRunning.Render("● "))
-		sb.WriteString(c.streamBuf)
-		sb.WriteString(StyleHint.Render(" ▊"))
-		sb.WriteString("\n")
+		if len(c.messages) > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(c.renderStreamingMessage())
 	}
 
 	c.viewport.SetContent(sb.String())
+	if stickToBottom {
+		c.viewport.GotoBottom()
+	}
 }
 
+func (c ChatView) hasInProgressTools() bool {
+	for _, m := range c.messages {
+		if m.Role == "tool" && m.Content == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c ChatView) shouldAutoScroll() bool {
+	return c.viewport.AtBottom() || c.viewport.TotalLineCount() == 0
+}
+
+// renderMessage 按 Role 分派渲染
 func (c *ChatView) renderMessage(msg ChatMessage) string {
 	switch msg.Role {
 	case "user":
-		prefix := StyleUserPrefix.Render("▎ ")
-		content := msg.Content
-		return StyleUserBlock.Render(prefix) + " " + content
+		// ❯ 用户文本（白色粗体）
+		prefix := StyleUserText.Render(SymUserPrompt + " ")
+		return prefix + StyleUserText.Render(strings.TrimSpace(msg.Content))
 
 	case "assistant":
-		// CC 风格：● 前缀标记 AI 响应块
-		prefix := lipgloss.NewStyle().Foreground(ColorText).Render("▎ ")
+		// MessageResponse 包裹 Glamour 渲染的 Markdown
+		body := msg.Content
 		if c.renderer != nil {
 			rendered, err := c.renderer.Render(msg.Content)
 			if err == nil {
-				return StyleAssistantBlock.Render(prefix) + " " + strings.TrimSpace(rendered)
+				body = strings.TrimSpace(rendered)
 			}
 		}
-		return StyleAssistantBlock.Render(prefix) + " " + StyleAIMsg.Render(msg.Content)
+		return wrapMessageResponse(body)
 
 	case "thinking":
-		// 极简显示，仅一行提示（对标 CC 的 thinking 指示器）
-		return StyleThinking.Render("  ∴ thinking")
+		// ∴ Thinking（dim + italic）
+		return StyleThinking.Render(SymThinking + " Thinking")
 
 	case "tool":
 		return c.renderToolMessage(msg)
 
 	case "system":
-		// 系统消息：已用 Lipgloss 预渲染，不经过 Glamour
-		return msg.Content
+		return StyleDim.Render(msg.Content)
 
 	case "error":
-		return StyleErrorMsg.Render("  ✗ " + msg.Content)
+		return wrapMessageResponse(StyleError.Render(msg.Content))
 
 	default:
 		return msg.Content
 	}
 }
 
-func (c *ChatView) renderToolMessage(msg ChatMessage) string {
-	// 解析工具参数预览
-	argPreview := toolArgPreview(msg.ToolName, msg.ToolInput)
-
-	// 执行中：蓝色 ⏺ + bold 工具名 + dim 参数
-	if msg.Content == "执行中..." {
-		header := StyleToolRunning.Render(" ⏺ ") + StyleToolName.Render(msg.ToolName)
-		if argPreview != "" {
-			header += StyleHint.Render("(" + argPreview + ")")
+// renderStreamingMessage 流式输出：对整个 streamBuf 调 Glamour 渲染后包裹
+func (c *ChatView) renderStreamingMessage() string {
+	body := c.streamBuf
+	if c.renderer != nil {
+		rendered, err := c.renderer.Render(body)
+		if err == nil {
+			body = strings.TrimSpace(rendered)
 		}
-		return StyleToolBlock.Render(header)
 	}
+	return wrapMessageResponse(body)
+}
 
-	// 完成状态：绿/红图标 + bold 工具名 + dim 参数
-	var icon string
-	var iconStyle lipgloss.Style
-	if msg.IsError {
-		icon = "✗"
-		iconStyle = StyleToolError
-	} else {
-		icon = "✓"
-		iconStyle = StyleToolSuccess
-	}
-
-	header := iconStyle.Render(" "+icon+" ") + StyleToolName.Render(msg.ToolName)
+// renderToolMessage 渲染工具调用行
+//
+//	执行中（Content 为空）：[闪烁⏺] ToolName(args)      — dim ⏺ 交替
+//	完成：                  [绿⏺] ToolName(args) + ⎿ 输出
+//	失败：                  [红⏺] ToolName(args) + ⎿ 输出
+func (c *ChatView) renderToolMessage(msg ChatMessage) string {
+	argPreview := toolArgPreview(msg.ToolName, msg.ToolInput)
+	nameStr := StyleToolName.Render(msg.ToolName)
+	argsStr := ""
 	if argPreview != "" {
-		header += StyleHint.Render("(" + argPreview + ")")
+		argsStr = StyleDim.Render("(" + argPreview + ")")
+	}
+	callStr := nameStr + argsStr
+
+	running := msg.Content == ""
+
+	var marker string
+	switch {
+	case running:
+		// 闪烁：交替显示 ⏺ 和空格
+		if c.toolBlink {
+			marker = StyleDim.Render(BlackCircle())
+		} else {
+			marker = " "
+		}
+	case msg.IsError:
+		marker = lipgloss.NewStyle().Foreground(ColorError).Render(BlackCircle())
+	default:
+		marker = lipgloss.NewStyle().Foreground(ColorSuccess).Render(BlackCircle())
 	}
 
-	// 无输出
-	if msg.Content == "" {
-		return StyleToolBlock.Render(header)
+	header := marker + " " + callStr
+
+	if running {
+		return header
 	}
 
-	lines := strings.Split(msg.Content, "\n")
+	// 有输出内容，用 MessageResponse 包裹
+	output := msg.Content
+	lines := strings.Split(output, "\n")
 	lineCount := len(lines)
 
-	// 折叠显示
+	var displayLines []string
 	if msg.Folded || lineCount > foldThreshold {
+		// 折叠：显示前 3 行 + 省略提示
 		previewEnd := 3
 		if previewEnd > lineCount {
 			previewEnd = lineCount
 		}
-		outputLines := formatToolOutput(lines[:previewEnd])
-		output := StyleToolOutput.Render(strings.Join(outputLines, "\n"))
-		remaining := lineCount - previewEnd
-		if remaining > 0 {
-			hint := StyleHint.Render(fmt.Sprintf("    … +%d lines (已折叠)", remaining))
-			return StyleToolBlock.Render(header) + "\n" + output + "\n" + hint
-		}
-		return StyleToolBlock.Render(header) + "\n" + output
+		displayLines = lines[:previewEnd]
+	} else {
+		displayLines = lines
 	}
 
-	// 完整显示（短输出）
-	outputLines := formatToolOutput(lines)
-	return StyleToolBlock.Render(header) + "\n" + StyleToolOutput.Render(strings.Join(outputLines, "\n"))
+	outputBody := StyleToolOutput.Render(strings.Join(displayLines, "\n"))
+	if len(displayLines) < lineCount {
+		outputBody += "\n" + StyleDim.Render(fmt.Sprintf("… +%d lines", lineCount-len(displayLines)))
+	}
+
+	return header + "\n" + wrapMessageResponse(outputBody)
 }
 
-// formatToolOutput 格式化工具输出行（缩进对齐，CC 风格）
-func formatToolOutput(lines []string) []string {
-	result := make([]string, 0, len(lines))
-	for i, line := range lines {
+// wrapMessageResponse 将内容用 CC 风格的 ⎿ 前缀包裹
+//
+//	第一行: "  ⎿  " + content_line_1    （dim 色的前缀）
+//	后续行: "      " + content_line_N    （等宽空格缩进）
+func wrapMessageResponse(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return StyleMsgResponse.Render(msgResponsePrefix)
+	}
+
+	prefix := StyleMsgResponse.Render(msgResponsePrefix)
+	indent := strings.Repeat(" ", lipgloss.Width(msgResponsePrefix))
+
+	// 压缩连续空行（Glamour 段落间距太大）
+	lines := strings.Split(content, "\n")
+	var compressed []string
+	prevEmpty := false
+	for _, line := range lines {
+		isEmpty := strings.TrimSpace(line) == ""
+		if isEmpty && prevEmpty {
+			continue // 跳过连续空行
+		}
+		compressed = append(compressed, line)
+		prevEmpty = isEmpty
+	}
+
+	var result []string
+	for i, line := range compressed {
 		if i == 0 {
-			result = append(result, "    ⎿ "+line)
+			result = append(result, prefix+line)
 		} else {
-			result = append(result, "      "+line)
+			result = append(result, indent+line)
 		}
 	}
-	return result
+	return strings.Join(result, "\n")
 }
 
 // toolArgPreview 从工具输入 JSON 中提取关键参数作为预览
@@ -305,14 +402,12 @@ func toolArgPreview(name, rawInput string) string {
 
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(rawInput), &m); err != nil {
-		// 非 JSON，直接截断返回
 		if len(rawInput) > 50 {
 			return rawInput[:47] + "..."
 		}
 		return rawInput
 	}
 
-	// 根据工具名选择最有代表性的参数
 	keyArgs := map[string]string{
 		"Bash":      "command",
 		"Read":      "path",
@@ -334,7 +429,6 @@ func toolArgPreview(name, rawInput string) string {
 		}
 	}
 
-	// 兜底：取第一个字符串值
 	for _, v := range m {
 		if s, ok := v.(string); ok && s != "" {
 			if len(s) > 60 {
@@ -345,22 +439,4 @@ func toolArgPreview(name, rawInput string) string {
 	}
 
 	return ""
-}
-
-// AddSystemMessage 添加系统消息（已预渲染的 ANSI 文本，不经过 Glamour）
-func (c *ChatView) AddSystemMessage(text string) {
-	c.messages = append(c.messages, ChatMessage{
-		Role:    "system",
-		Content: text,
-	})
-	c.refreshContent()
-	c.viewport.GotoBottom()
-}
-
-// Clear 清空消息
-func (c *ChatView) Clear() {
-	c.messages = nil
-	c.streamBuf = ""
-	c.streaming = false
-	c.refreshContent()
 }

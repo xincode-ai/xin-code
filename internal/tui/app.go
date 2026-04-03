@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/xincode-ai/xin-code/internal/cost"
@@ -15,46 +14,45 @@ import (
 type AppState int
 
 const (
-	StateInput    AppState = iota // 等待用户输入
-	StateQuery                   // 等待 API 响应
-	StateToolExec                // 工具执行中
-	StatePermission              // 等待权限确认
-	StateDiffPreview             // 等待 Diff 确认
-	StateAskUser                 // AskUser 等待用户输入
+	StateInput       AppState = iota // 等待用户输入
+	StateQuery                       // 等待模型响应
+	StateToolExec                    // 工具执行中
+	StatePermission                  // 等待权限确认
+	StateDiffPreview                 // 等待差异确认
+	StateAskUser                     // 询问工具等待用户输入
 )
 
-// EventSender Agent 向 TUI 发送事件的回调接口
+// EventSender 模型代理向界面发送事件的回调接口
 type EventSender func(tea.Msg)
 
 // App TUI 主 Model
 type App struct {
 	// 子组件
-	statusBar  StatusBar
 	chat       ChatView
 	input      InputBox
 	permission PermissionDialog
-	spinner    spinner.Model
+	diff       DiffDialog
+	ccSpinner  SpinnerState
 
 	// 斜杠命令
 	slashHandler *slash.Handler
 
 	// 状态
-	state     AppState
-	width     int
-	height    int
-	quitting  bool
+	state    AppState
+	width    int
+	height   int
+	quitting bool
 
-	// Agent 通信
-	eventCh          chan tea.Msg    // Agent goroutine -> TUI
-	submitCh         chan string     // TUI -> 外部 Agent (用户输入)
-	askResponseCh    chan string     // AskUser 回传 channel
-	diffResponseCh   chan bool       // Diff 确认回传 channel
-	waitingForEvent  bool           // 防止重复注册 waitForEvent
+	// 模型代理通信
+	eventCh         chan tea.Msg // 模型代理协程 -> 终端界面
+	submitCh        chan string  // 终端界面 -> 外部模型代理（用户输入）
+	askResponseCh   chan string  // 询问工具回传通道
+	waitingForEvent bool        // 防止重复注册 waitForEvent
 
 	// 配置
-	model      string
-	provider   string
-	tracker    *cost.Tracker
+	model    string
+	provider string
+	tracker  *cost.Tracker
 	maxContext int
 	version    string
 	toolCount  int
@@ -66,6 +64,7 @@ type App struct {
 	OnCompact     func() string
 	OnModelSwitch func(string)
 	OnExport      func() string
+	OnInterrupt   func()
 	OnResume      func() string
 	OnSkillsList  func() string
 	OnPluginsList func() string
@@ -90,50 +89,39 @@ type AppConfig struct {
 
 // NewApp 创建 TUI 应用
 func NewApp(cfg AppConfig) *App {
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(ColorAccent)
-
 	slashH := slash.NewHandler()
 	chat := NewChatView(80, 20)
 
-	// 欢迎信息
-	welcome := StyleBrand.Render("⚡ XIN CODE") + " " + StyleHint.Render("v"+cfg.Version) + "\n\n" +
-		StyleTextDim.Render("  模型: ") + StyleModel.Render(cfg.Model) + "\n" +
-		StyleTextDim.Render("  权限: ") + StyleHint.Render(cfg.PermMode) + "\n" +
-		StyleTextDim.Render("  工具: ") + StyleHint.Render(fmt.Sprintf("%d 个", cfg.ToolCount)) + "\n\n" +
-		StyleTextDim.Render("  输入消息开始对话。/help 查看命令。")
-	chat.AddSystemMessage(welcome)
+	// 极简欢迎消息（CC 风格）
+	chat.AddSystemMessage(renderWelcomeBanner(cfg))
 
 	return &App{
-		statusBar:    NewStatusBar(cfg.Model, cfg.Tracker, cfg.MaxContext),
 		chat:         chat,
-		input:        NewInputBox(slashH.CommandNames()),
+		input:        NewInputBox(commandHintsFromSlash(slashH.AllCommands())),
 		permission:   NewPermissionDialog(),
-		spinner:      sp,
+		diff:         NewDiffDialog(),
+		ccSpinner:    NewSpinnerState(),
 		slashHandler: slashH,
-
-		state:      StateInput,
-		eventCh:    make(chan tea.Msg, 512),
-		submitCh:   make(chan string, 8),
-
-		model:      cfg.Model,
-		provider:   cfg.Provider,
-		tracker:    cfg.Tracker,
-		maxContext: cfg.MaxContext,
-		version:    cfg.Version,
-		toolCount:  cfg.ToolCount,
-		permMode:   cfg.PermMode,
-		workDir:    cfg.WorkDir,
+		state:        StateInput,
+		eventCh:      make(chan tea.Msg, 512),
+		submitCh:     make(chan string, 8),
+		model:        cfg.Model,
+		provider:     cfg.Provider,
+		tracker:      cfg.Tracker,
+		maxContext:   cfg.MaxContext,
+		version:      cfg.Version,
+		toolCount:    cfg.ToolCount,
+		permMode:     cfg.PermMode,
+		workDir:      cfg.WorkDir,
 	}
 }
 
-// SubmitCh 返回用户提交消息的 channel（外部 Agent 读取）
+// SubmitCh 返回用户提交消息的通道（外部模型代理读取）
 func (a *App) SubmitCh() <-chan string {
 	return a.submitCh
 }
 
-// Send 向 TUI 发送消息（Agent goroutine 调用）
+// Send 向终端界面发送消息（模型代理协程调用）
 func (a *App) Send(msg tea.Msg) {
 	a.eventCh <- msg
 }
@@ -168,7 +156,7 @@ func (a *App) Init() tea.Cmd {
 	a.waitingForEvent = true
 	return tea.Batch(
 		a.input.Init(),
-		a.spinner.Tick,
+		SpinnerTickCmd(),
 		waitForEvent(a.eventCh),
 	)
 }
@@ -176,7 +164,6 @@ func (a *App) Init() tea.Cmd {
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	// 来自 eventCh 的消息到达后，重置等待标志
 	switch msg.(type) {
 	case MsgTextDelta, MsgThinking, MsgToolStart, MsgToolDone,
 		MsgUsage, MsgResponseDone, MsgAgentDone,
@@ -189,83 +176,56 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
+		a.resizeLayout()
+		return a, nil
 
-		// 布局分配：状态栏含边框 ~3 行，分隔线 2 行，输入框含边框 ~4 行
-		statusH := 3  // 状态栏（含 border 行）
-		sepH := 2     // 顶部 + 底部分隔线
-		inputH := 4   // 输入框（含 InputFrame 边框和 padding）
-		chatH := a.height - statusH - sepH - inputH
-		if chatH < 5 {
-			chatH = 5
-		}
-
-		chatMsg := tea.WindowSizeMsg{Width: msg.Width, Height: chatH}
-		a.statusBar, _ = a.statusBar.Update(msg)
-		a.chat, _ = a.chat.Update(chatMsg)
-		a.input, _ = a.input.Update(msg)
-		a.permission, _ = a.permission.Update(msg)
+	case tea.MouseMsg:
+		// 鼠标滚轮事件转发给 chat viewport 处理滚动
+		a.chat, _ = a.chat.Update(msg)
 		return a, nil
 
 	case tea.KeyMsg:
-		// 全局快捷键
-		switch msg.Type {
-		case tea.KeyCtrlC:
-			if a.state == StateQuery || a.state == StateToolExec {
-				// 中断当前操作，回到输入状态
-				a.state = StateInput
-				a.chat.AddSystemMessage(StyleHint.Render("[已中断]"))
-				return a, a.input.Focus()
-			}
-			a.quitting = true
-			return a, tea.Quit
-		case tea.KeyCtrlL:
-			// 清屏
-			a.chat.Clear()
-			return a, nil
-		}
-
-		// 权限对话框拦截键盘
 		if a.permission.IsVisible() {
 			a.permission, _ = a.permission.Update(msg)
-			// 权限对话框关闭后回到之前状态
 			if !a.permission.IsVisible() {
+				a.state = StateToolExec
 				cmds = append(cmds, a.safeWaitForEvent())
 			}
 			return a, tea.Batch(cmds...)
 		}
 
-		// Diff 预览确认拦截键盘
-		if a.state == StateDiffPreview {
-			switch msg.String() {
-			case "y", "Y":
-				responseCh := a.diffResponseCh
-				a.diffResponseCh = nil
+		if a.diff.IsVisible() {
+			a.diff, _ = a.diff.Update(msg)
+			if !a.diff.IsVisible() {
 				a.state = StateToolExec
-				cmd := func() tea.Msg {
-					if responseCh != nil {
-						responseCh <- true
-					}
-					return nil
-				}
-				cmds = append(cmds, cmd, a.safeWaitForEvent())
-				return a, tea.Batch(cmds...)
-			case "n", "N":
-				responseCh := a.diffResponseCh
-				a.diffResponseCh = nil
-				a.state = StateToolExec
-				cmd := func() tea.Msg {
-					if responseCh != nil {
-						responseCh <- false
-					}
-					return nil
-				}
-				cmds = append(cmds, cmd, a.safeWaitForEvent())
-				return a, tea.Batch(cmds...)
+				cmds = append(cmds, a.safeWaitForEvent())
 			}
+			return a, tea.Batch(cmds...)
+		}
+
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			if a.state == StateQuery || a.state == StateToolExec {
+				if a.OnInterrupt != nil {
+					a.OnInterrupt()
+				}
+				a.state = StateInput
+				a.ccSpinner.Stop()
+				a.chat.AddSystemMessage("已请求中断当前操作。")
+				return a, a.input.Focus()
+			}
+			a.quitting = true
+			return a, tea.Quit
+		case tea.KeyCtrlL:
+			a.chat.Clear()
 			return a, nil
 		}
 
-		// AskUser 状态下，Enter 提交回答
+		if a.shouldRouteKeyToChat(msg) {
+			a.chat, _ = a.chat.Update(msg)
+			return a, nil
+		}
+
 		if a.state == StateAskUser {
 			if msg.Type == tea.KeyEnter {
 				answer := strings.TrimSpace(a.input.Value())
@@ -274,7 +234,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					a.askResponseCh = nil
 					a.input.Reset()
 					a.state = StateToolExec
-					// 通过异步 Cmd 写入，避免阻塞 TUI 事件循环
 					cmd := func() tea.Msg {
 						if responseCh != nil {
 							responseCh <- answer
@@ -282,23 +241,25 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return nil
 					}
 					cmds = append(cmds, cmd, a.safeWaitForEvent())
+					a.resizeLayout()
 					return a, tea.Batch(cmds...)
 				}
 			}
 			a.input, _ = a.input.Update(msg)
+			a.resizeLayout()
 			return a, nil
 		}
 
 	case MsgSubmit:
 		text := msg.Text
-		// 斜杠命令处理
 		if strings.HasPrefix(text, "/") {
-			return a.handleSlashCommand(text)
+			model, cmd := a.handleSlashCommand(text)
+			a.resizeLayout()
+			return model, cmd
 		}
-		// 用户消息 -> 更新对话区
+
 		a.chat, _ = a.chat.Update(msg)
 		a.state = StateQuery
-		// 通过异步 Cmd 通知外部 Agent，避免阻塞 TUI 事件循环
 		submitCmd := func() tea.Msg {
 			a.submitCh <- text
 			return nil
@@ -308,6 +269,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgTextDelta:
 		a.state = StateQuery
+		if !a.ccSpinner.active {
+			a.ccSpinner.Start()
+		}
 		a.chat, _ = a.chat.Update(msg)
 		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
@@ -319,6 +283,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgToolStart:
 		a.state = StateToolExec
+		if !a.ccSpinner.active {
+			a.ccSpinner.Start()
+		}
 		a.chat, _ = a.chat.Update(msg)
 		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
@@ -347,6 +314,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgAgentDone:
 		a.state = StateInput
+		a.ccSpinner.Stop()
 		if msg.Err != nil {
 			a.chat, _ = a.chat.Update(MsgError{Err: msg.Err})
 		}
@@ -361,40 +329,40 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgDiffPreview:
 		a.state = StateDiffPreview
-		a.diffResponseCh = msg.Response
-		a.chat.AddSystemMessage(StyleDiffHeader.Render("📝 Edit: "+msg.Path) + "\n" + msg.DiffText + "\n" + StyleHint.Render("[y]确认  [n]取消"))
+		a.diff.Show(msg.Path, msg.DiffText, msg.Response)
 		a.input.Blur()
 		return a, nil
 
 	case MsgAskUser:
 		a.state = StateAskUser
 		a.askResponseCh = msg.Response
-		a.chat.AddSystemMessage(StylePermTitle.Render("❓ "+msg.Question))
+		a.chat.AddSystemMessage("需要你补充输入：\n" + msg.Question)
 		cmds = append(cmds, a.input.Focus())
 		return a, tea.Batch(cmds...)
 
 	case MsgSystemNotice:
-		a.chat.AddSystemMessage(StyleHint.Render(msg.Text))
+		a.chat.AddSystemMessage(msg.Text)
 		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
 
 	case MsgError:
 		a.chat, _ = a.chat.Update(msg)
 		a.state = StateInput
+		a.ccSpinner.Stop()
 		cmds = append(cmds, a.input.Focus())
 		return a, tea.Batch(cmds...)
 
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		a.spinner, cmd = a.spinner.Update(msg)
-		cmds = append(cmds, cmd)
+	case MsgSpinnerTick:
+		a.ccSpinner.Tick()
+		a.chat, _ = a.chat.Update(msg) // 转发给 chat 驱动工具闪烁
+		cmds = append(cmds, SpinnerTickCmd())
 		return a, tea.Batch(cmds...)
 	}
 
-	// 默认传递给 input
 	if a.state == StateInput || a.state == StateAskUser {
 		var cmd tea.Cmd
 		a.input, cmd = a.input.Update(msg)
+		a.resizeLayout()
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -405,57 +373,75 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a *App) View() string {
 	if a.quitting {
-		return StyleHint.Render("再见！\n")
+		return StyleDim.Render("Goodbye.\n")
 	}
-
 	if a.width == 0 {
-		return "初始化中..."
+		return ""
+	}
+	if a.diff.IsVisible() {
+		return a.diff.View()
 	}
 
-	var sections []string
-
-	// 状态栏（顶部）
-	sections = append(sections, a.statusBar.View())
-
-	// 顶部分隔线
-	sections = append(sections, StyleSeparator.Render(strings.Repeat(SeparatorChar, a.width)))
-
-	// 对话区域（中间）
-	chatView := a.chat.View()
-	sections = append(sections, chatView)
-
-	// 状态指示器（极简，不抢视觉）
-	switch a.state {
-	case StateQuery:
-		sections = append(sections, StyleTextDim.Render("  "+a.spinner.View()))
-	case StateToolExec:
-		sections = append(sections, StyleTextDim.Render("  "+a.spinner.View()))
+	contentWidth := a.width - 2
+	if contentWidth < 40 {
+		contentWidth = a.width
 	}
 
-	// 底部分隔线
-	sections = append(sections, StyleSeparator.Render(strings.Repeat(SeparatorChar, a.width)))
+	// 底部组件
+	var bottomParts []string
 
-	// 权限对话框（覆盖在输入框位置）
+	// Spinner 行（仅在活跃时显示）
+	if spinnerView := a.ccSpinner.View(); spinnerView != "" {
+		bottomParts = append(bottomParts, spinnerView)
+	}
+
+	// 权限确认（嵌入底部）
 	if a.permission.IsVisible() {
-		sections = append(sections, a.permission.View())
-	} else {
-		// 输入框（底部）- 带边框框架
-		inputContent := a.input.View()
-		sections = append(sections, StyleInputFrame.Render(inputContent))
+		cardWidth := min(88, max(48, contentWidth-4))
+		bottomParts = append(bottomParts, a.permission.Card(cardWidth))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+	// 输入框（CC 风格：仅上下横线，无左右竖线）
+	inputBorder := lipgloss.NewStyle().
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderTop(true).
+		BorderBottom(true).
+		BorderLeft(false).
+		BorderRight(false).
+		BorderForeground(ColorInputBorder).
+		Width(contentWidth).
+		MarginTop(1)
+	bottomParts = append(bottomParts, inputBorder.Render(a.input.View()))
+
+	// Footer 单行
+	bottomParts = append(bottomParts, a.renderFooter())
+
+	bottom := strings.Join(bottomParts, "\n")
+	bottomHeight := lipgloss.Height(bottom)
+
+	// 聊天区占满剩余高度
+	chatHeight := a.height - bottomHeight - 1
+	if chatHeight < 4 {
+		chatHeight = 4
+	}
+
+	// 更新 chat 尺寸并获取视图
+	a.chat, _ = a.chat.Update(tea.WindowSizeMsg{Width: contentWidth, Height: chatHeight})
+	chatView := a.chat.View()
+
+	return lipgloss.NewStyle().Padding(0, 1).Render(
+		lipgloss.JoinVertical(lipgloss.Left, chatView, bottom),
+	)
 }
 
 func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
-	// 构建命令上下文
 	ctx := &slash.Context{
 		Model:               a.model,
 		Provider:            a.provider,
 		Version:             a.version,
 		PermMode:            a.permMode,
 		Currency:            a.tracker.Currency(),
-		MaxContext:           a.maxContext,
+		MaxContext:          a.maxContext,
 		InputTokens:         a.tracker.InputTokens(),
 		OutputTokens:        a.tracker.OutputTokens(),
 		TotalTokens:         a.tracker.TotalTokens(),
@@ -493,8 +479,7 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case slash.ResultPrompt:
-		// 预设 prompt -> 作为用户消息发送给 Agent
-		a.chat.AddSystemMessage(StyleHint.Render(fmt.Sprintf("[%s]", cmd)))
+		a.chat.AddSystemMessage(fmt.Sprintf("执行命令 %s", cmd))
 		a.state = StateQuery
 		submitCmd := func() tea.Msg {
 			a.submitCh <- result.Content
@@ -507,4 +492,162 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+func (a *App) resizeLayout() {
+	if a.width == 0 || a.height == 0 {
+		return
+	}
+	contentWidth := a.width - 2
+	if contentWidth < 40 {
+		contentWidth = a.width
+	}
+	// 输入框无左右边框，只需减去少量余量
+	a.input, _ = a.input.Update(tea.WindowSizeMsg{Width: contentWidth - 2})
+	a.permission, _ = a.permission.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
+	a.diff, _ = a.diff.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
+}
+
+// renderFooter 渲染底部状态行（CC 风格极简单行）
+func (a *App) renderFooter() string {
+	parts := []string{shortModelName(a.model)}
+	parts = append(parts, a.tracker.CostString())
+	parts = append(parts, fmt.Sprintf("%d%% context", a.contextPercent()))
+
+	// 权限模式简写（CC StatusLine 也显示权限模式）
+	permLabels := map[string]string{
+		"bypass":      "bypass",
+		"acceptEdits": "auto-edit",
+		"default":     "默认确认",
+		"plan":        "plan-only",
+		"interactive": "全部确认",
+	}
+	if label, ok := permLabels[a.permMode]; ok {
+		parts = append(parts, label)
+	}
+
+	parts = append(parts, "/help")
+	parts = append(parts, "Option+drag to select")
+	return StyleFooter.Render(strings.Join(parts, " · "))
+}
+
+func (a *App) shouldRouteKeyToChat(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "pgup", "pgdown", "home", "end":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) contextPercent() int {
+	if a.maxContext <= 0 {
+		return 0
+	}
+	used := a.tracker.TotalTokens()
+	percent := float64(used) / float64(a.maxContext) * 100
+	if percent > 100 {
+		percent = 100
+	}
+	return int(percent + 0.5)
+}
+
+func (a *App) contentWidth() int {
+	width := a.width - 2
+	if width < 40 {
+		width = a.width
+	}
+	return width
+}
+
+func permissionLabel(mode string) string {
+	switch mode {
+	case "default":
+		return "默认确认"
+	case "acceptEdits":
+		return "自动接受编辑"
+	case "plan":
+		return "仅规划"
+	case "bypassPermissions":
+		return "完全放行"
+	case "interactive":
+		return "交互确认"
+	default:
+		if mode == "" {
+			return "未设置"
+		}
+		return mode
+	}
+}
+
+func shortModelName(model string) string {
+	parts := strings.Split(model, "-")
+	if len(parts) >= 5 {
+		last := parts[len(parts)-1]
+		if len(last) == 8 && strings.Trim(last, "0123456789") == "" {
+			return strings.Join(parts[:len(parts)-1], "-")
+		}
+	}
+	return truncateText(model, 18)
+}
+
+func commandHintsFromSlash(commands []*slash.Command) []CommandHint {
+	hints := make([]CommandHint, 0, len(commands))
+	for _, cmd := range commands {
+		hints = append(hints, CommandHint{
+			Name:        cmd.Name,
+			Description: cmd.Description,
+		})
+	}
+	return hints
+}
+
+// renderWelcomeBanner 渲染 CC 风格的欢迎横幅（ASCII art + 信息）
+func renderWelcomeBanner(cfg AppConfig) string {
+	// ASCII art "X" 标记（品牌橙色）
+	art := []string{
+		"  ▀▄ ▄▀",
+		"    █  ",
+		"  ▄▀ ▀▄",
+	}
+
+	orange := lipgloss.NewStyle().Foreground(ColorBrand)
+	bold := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
+	dim := StyleDim
+
+	// 右侧信息（与 art 对齐）
+	info := []string{
+		bold.Render("Xin Code") + "  " + dim.Render("v"+cfg.Version),
+		dim.Render(shortModelName(cfg.Model) + " · " + permissionLabel(cfg.PermMode)),
+		dim.Render(cfg.WorkDir),
+	}
+
+	// 拼合：art 在左，info 在右
+	var lines []string
+	// 顶部留空一行
+	lines = append(lines, "")
+	for i := 0; i < len(art); i++ {
+		left := orange.Render(art[i])
+		right := ""
+		if i < len(info) {
+			right = info[i]
+		}
+		lines = append(lines, left+"    "+right)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func truncateText(s string, limit int) string {
+	if limit <= 0 || lipgloss.Width(s) <= limit {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= 1 {
+		return s
+	}
+	if len(runes) > limit-1 {
+		runes = runes[:limit-1]
+	}
+	return string(runes) + "…"
 }

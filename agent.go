@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"time"
 
+	agentRetry "github.com/xincode-ai/xin-code/internal/agent"
 	xcontext "github.com/xincode-ai/xin-code/internal/context"
 	"github.com/xincode-ai/xin-code/internal/cost"
 	"github.com/xincode-ai/xin-code/internal/provider"
@@ -19,6 +22,9 @@ type Agent struct {
 	permission tool.PermissionChecker
 	config     *Config
 	messages   []provider.Message
+	version    string // 版本号
+	permMode   string // 权限模式
+	reminderInjected bool // system-reminder 是否已注入
 
 	// 会话管理
 	session *session.Session
@@ -37,6 +43,8 @@ func NewAgent(p provider.Provider, tools *tool.Registry, cfg *Config, sess *sess
 		permission: &tool.SimplePermissionChecker{Mode: tool.PermissionMode(cfg.Permission.Mode)},
 		config:     cfg,
 		messages:   make([]provider.Message, 0),
+		version:    Version,
+		permMode:   cfg.Permission.Mode,
 		session:    sess,
 		store:      store,
 		tracker:    tracker,
@@ -51,9 +59,34 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 	a.messages = append(a.messages, userMsg)
 	a.session.AddMessage(userMsg)
 
-	// 组装 system prompt
-	projectInstructions := xcontext.LoadProjectInstructions()
-	systemPrompt := xcontext.BuildSystemPrompt(a.tools.ToolDefs(), projectInstructions)
+	// 组装 system prompt（CC 风格：多层级发现 + 分层结构）
+	homeDir, _ := os.UserHomeDir()
+	promptCfg := xcontext.SystemPromptConfig{
+		WorkDir:    a.session.WorkDir,
+		HomeDir:    homeDir,
+		Model:      a.config.Model,
+		Provider:   a.provider.Name(),
+		Version:    a.version,
+		ToolCount:  len(a.tools.All()),
+		PermMode:   a.permMode,
+		MaxContext: a.provider.Capabilities().MaxContext,
+	}
+	systemPrompt := xcontext.BuildFullSystemPrompt(promptCfg, a.tools.ToolDefs())
+
+	// Git 状态快照拼入 system prompt 末尾（CC: appendSystemContext）
+	if sysCtx := xcontext.BuildSystemContext(promptCfg); sysCtx != "" {
+		systemPrompt += "\n\n" + sysCtx
+	}
+
+	// 用户上下文（XINCODE.md + 日期）作为 system-reminder user message 注入消息列表首位
+	// CC 参考：prependUserContext() — 创建 role:user 消息包裹 <system-reminder> 标签
+	if !a.reminderInjected {
+		if userCtx := xcontext.BuildUserContext(promptCfg); userCtx != "" {
+			reminderMsg := provider.NewTextMessage(provider.RoleUser, "<system-reminder>\n"+userCtx+"\n</system-reminder>")
+			a.messages = append([]provider.Message{reminderMsg}, a.messages...)
+			a.reminderInjected = true
+		}
+	}
 
 	turns := 0
 	for {
@@ -81,17 +114,27 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 			MaxTokens: a.config.MaxTokens,
 		}
 
-		// 流式调用 API
-		events, err := a.provider.Stream(ctx, req)
-		if err != nil {
-			a.send(tui.MsgAgentDone{Err: fmt.Errorf("API error: %w", err)})
+		// 流式调用 API（带重试）
+		var events <-chan provider.Event
+		var streamErr error
+		retryCfg := agentRetry.DefaultRetryConfig()
+		retryCfg.OnRetry = func(attempt int, err error, delay time.Duration) {
+			a.send(tui.MsgSystemNotice{Text: fmt.Sprintf("API 错误，%v 后重试 (第 %d 次)...", delay.Round(time.Second), attempt)})
+		}
+		retryErr := agentRetry.WithRetry(ctx, retryCfg, func(ctx context.Context, attempt int) error {
+			var err error
+			events, err = a.provider.Stream(ctx, req)
+			return err
+		})
+		if retryErr != nil {
+			a.send(tui.MsgAgentDone{Err: fmt.Errorf("API error: %w", retryErr)})
 			return
 		}
 
 		// 处理流式事件
-		assistantMsg, toolCalls, err := a.processStream(events)
-		if err != nil {
-			a.send(tui.MsgAgentDone{Err: err})
+		assistantMsg, toolCalls, streamErr := a.processStream(events)
+		if streamErr != nil {
+			a.send(tui.MsgAgentDone{Err: streamErr})
 			return
 		}
 
@@ -229,3 +272,4 @@ func (a *Agent) saveSession() {
 		_ = a.store.Save(a.session)
 	}
 }
+

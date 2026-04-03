@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xincode-ai/xin-code/internal/auth"
@@ -183,6 +185,17 @@ func main() {
 		return result
 	}
 
+	var runMu sync.Mutex
+	var cancelCurrentRun context.CancelFunc
+	app.OnInterrupt = func() {
+		runMu.Lock()
+		cancel := cancelCurrentRun
+		runMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+
 	// 注册工具（AskUser / DiffPreview 通过 TUI channel 交互）
 	tools := tool.NewRegistry()
 	builtin.RegisterAll(tools, builtin.RegisterConfig{
@@ -220,9 +233,18 @@ func main() {
 
 	// 启动 Agent goroutine：监听 TUI 提交的消息
 	go func() {
-		ctx := context.Background()
 		for userMsg := range app.SubmitCh() {
-			agent.Run(ctx, userMsg)
+			runCtx, cancel := context.WithCancel(context.Background())
+			runMu.Lock()
+			cancelCurrentRun = cancel
+			runMu.Unlock()
+
+			agent.Run(runCtx, userMsg)
+
+			runMu.Lock()
+			cancelCurrentRun = nil
+			runMu.Unlock()
+			cancel()
 			// 更新 TUI 中的会话信息
 			app.SessionTurns = sess.Turns
 		}
@@ -231,16 +253,23 @@ func main() {
 	// 启动 TUI
 	// 预设终端背景色检测，避免 Lipgloss OSC 查询导致 ANSI 响应泄漏到输入框
 	os.Setenv("GLAMOUR_STYLE", "dark")
+	// SGR 鼠标转义序列片段：ESC 被拆到前一次读取，剩余 [<数字;数字;数字M 泄漏为 KeyMsg
+	// Claude Code 有同样问题，用正则过滤：/^\[<\d+;\d+;\d+[Mm]/
+	sgrMouseRe := regexp.MustCompile(`^\[<\d+;\d+;\d+[Mm]`)
+
 	prog := tea.NewProgram(app,
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(), // 启用鼠标滚轮支持
+		tea.WithMouseCellMotion(), // 鼠标滚轮滚动；Option+拖拽选择文本
 		tea.WithFilter(func(m tea.Model, msg tea.Msg) tea.Msg {
-			// 过滤掉终端 OSC 响应（背景/前景色查询回复）
-			// 这些响应会被 Bubbletea 的 stdin reader 捕获
 			if keyMsg, ok := msg.(tea.KeyMsg); ok {
 				s := keyMsg.String()
+				// 过滤掉终端 OSC 响应（背景/前景色查询回复）
 				if strings.Contains(s, "rgb:") || strings.HasPrefix(s, "]") ||
 					strings.Contains(s, "\x1b") {
+					return nil
+				}
+				// 过滤掉泄漏的 SGR 鼠标转义序列片段
+				if sgrMouseRe.MatchString(s) {
 					return nil
 				}
 			}

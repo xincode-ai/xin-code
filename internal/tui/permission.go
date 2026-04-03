@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // PermissionDialog 权限确认对话框
@@ -14,6 +16,7 @@ type PermissionDialog struct {
 	input    string
 	response chan PermissionResponse
 	width    int
+	height   int
 }
 
 // NewPermissionDialog 创建权限对话框
@@ -41,13 +44,17 @@ func (p PermissionDialog) Update(msg tea.Msg) (PermissionDialog, tea.Cmd) {
 			p.respond(PermAlways)
 			return p, nil
 		case "e", "E":
-			// 'e' for nEver
+			// 使用 E 表示始终拒绝
 			p.respond(PermNever)
+			return p, nil
+		case "esc", "ctrl+c":
+			p.respond(PermDeny)
 			return p, nil
 		}
 
 	case tea.WindowSizeMsg:
 		p.width = msg.Width
+		p.height = msg.Height
 	}
 
 	return p, nil
@@ -58,35 +65,49 @@ func (p PermissionDialog) View() string {
 		return ""
 	}
 
-	maxInputWidth := p.width - 6
-	if maxInputWidth < 40 {
-		maxInputWidth = 40
+	cardWidth := min(78, max(52, p.width-6))
+	box := p.Card(cardWidth)
+	return lipgloss.Place(p.width, p.height, lipgloss.Center, lipgloss.Bottom, box)
+}
+
+// Card 渲染权限确认卡片
+func (p PermissionDialog) Card(width int) string {
+	if width < 40 {
+		width = 40
 	}
 
-	// 截断输入显示
-	inputPreview := p.input
-	if len(inputPreview) > 200 {
-		inputPreview = inputPreview[:200] + "..."
-	}
-	// 对齐宽度
-	lines := strings.Split(inputPreview, "\n")
-	if len(lines) > 5 {
-		lines = append(lines[:5], "...")
-	}
-	inputPreview = strings.Join(lines, "\n")
+	preview := p.previewLines(width - 16)
 
-	title := StylePermTitle.Render("⚠ 权限确认")
-	tool := StyleToolName.Render(p.toolName)
-	options := StyleHint.Render("[y]允许  [n]拒绝  [a]总是允许  [e]总是拒绝")
-
-	content := fmt.Sprintf(
-		"%s\n\n工具: %s\n参数:\n%s\n\n%s",
-		title, tool,
-		StyleToolOutput.Render(inputPreview),
-		options,
+	header := lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		StylePermTitle.Render("权限确认"),
+		"  ",
+		StyleToolName.Render(p.toolName),
 	)
 
-	return StylePermBox.Width(maxInputWidth).Render(content)
+	if len(preview) > 0 {
+		header = lipgloss.JoinHorizontal(
+			lipgloss.Left,
+			header,
+			"  ",
+			StyleDim.Render(preview[0]),
+		)
+	}
+
+	sections := []string{header}
+	if len(preview) > 1 {
+		for _, line := range preview[1:] {
+			sections = append(sections, StyleToolOutput.Render("  "+line))
+		}
+	}
+	sections = append(sections, StyleDim.Render("Y 允许  ·  N 拒绝  ·  A 始终允许  ·  E 始终拒绝  ·  Esc 取消"))
+
+	return lipgloss.NewStyle().
+		BorderLeft(true).
+		BorderForeground(ColorPerm).
+		PaddingLeft(1).
+		Width(width).
+		Render(strings.Join(sections, "\n"))
 }
 
 // Show 显示权限对话框
@@ -116,4 +137,48 @@ func (p *PermissionDialog) respond(r PermissionResponse) {
 		close(p.response)
 	}
 	p.Hide()
+}
+
+func (p PermissionDialog) previewLines(maxWidth int) []string {
+	preview := summarizePermissionInput(p.toolName, p.input)
+	lines := strings.Split(preview, "\n")
+	if len(lines) > 2 {
+		lines = append(lines[:2], fmt.Sprintf("… 另有 %d 行参数", len(lines)-2))
+	}
+
+	for i, line := range lines {
+		lines[i] = truncateText(strings.TrimSpace(line), maxWidth)
+	}
+	return lines
+}
+
+func summarizePermissionInput(toolName string, raw string) string {
+	if raw == "" {
+		return "无参数"
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return raw
+	}
+
+	switch toolName {
+	case "Bash":
+		if cmd, ok := payload["command"].(string); ok && cmd != "" {
+			return cmd
+		}
+	case "Read", "Write", "Edit":
+		if path, ok := payload["path"].(string); ok && path != "" {
+			return path
+		}
+	case "Glob", "Grep":
+		if pattern, ok := payload["pattern"].(string); ok && pattern != "" {
+			return pattern
+		}
+	}
+
+	if pretty, err := json.MarshalIndent(payload, "", "  "); err == nil {
+		return string(pretty)
+	}
+	return raw
 }

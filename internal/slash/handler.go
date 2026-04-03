@@ -5,6 +5,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/xincode-ai/xin-code/internal/memory"
 )
 
 // ResultType 命令结果类型
@@ -676,9 +678,33 @@ func cmdMCP() *Command {
 func cmdMemory() *Command {
 	return &Command{
 		Name:        "/memory",
-		Description: "记忆系统",
+		Description: "查看和管理记忆",
 		Handler: func(args []string, ctx *Context) Result {
-			return Result{Type: ResultDisplay, Content: "记忆系统将在 v1.1 中实现"}
+			homeDir, _ := os.UserHomeDir()
+			memDir := memory.GetMemoryDir(homeDir, ctx.WorkDir)
+			memories, err := memory.ScanMemoryDir(memDir)
+			if err != nil {
+				return Result{Type: ResultDisplay, Content: fmt.Sprintf("读取记忆失败: %s", err)}
+			}
+			if len(memories) == 0 {
+				return Result{Type: ResultDisplay, Content: fmt.Sprintf("暂无记忆。\n记忆目录: %s\n\n模型可以在对话中自动创建和更新记忆。", memDir)}
+			}
+
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("📝 记忆 (%d 条)\n\n", len(memories)))
+			for _, m := range memories {
+				typeTag := string(m.Type)
+				if typeTag == "" {
+					typeTag = "?"
+				}
+				desc := m.Description
+				if len(desc) > 60 {
+					desc = desc[:57] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  [%s] %s — %s\n", typeTag, m.Name, desc))
+			}
+			sb.WriteString(fmt.Sprintf("\n目录: %s", memDir))
+			return Result{Type: ResultDisplay, Content: sb.String()}
 		},
 	}
 }
