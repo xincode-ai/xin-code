@@ -176,6 +176,18 @@ func main() {
 		}
 		return fmt.Sprintf("已导出到: %s", exportPath)
 	}
+	app.OnLogin = func() string {
+		return "请退出后运行 xin-code 重新配置，或设置环境变量：\n" +
+			"  export ANTHROPIC_API_KEY=your-key\n" +
+			"  export OPENAI_API_KEY=your-key\n\n" +
+			"当前凭据路径: " + filepath.Join(XinCodeDir(), "auth", "credentials.json")
+	}
+	app.OnLogout = func() string {
+		if err := auth.ClearAPIKey(XinCodeDir()); err != nil {
+			return fmt.Sprintf("清除凭据失败: %s", err)
+		}
+		return "已清除保存的 API Key。\n下次启动将重新进入配置向导。"
+	}
 	app.OnResume = func() string {
 		entries, err := store.List(workDir)
 		if err != nil {

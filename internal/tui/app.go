@@ -66,6 +66,8 @@ type App struct {
 	OnExport      func() string
 	OnInterrupt   func()
 	OnResume      func() string
+	OnLogin       func() string
+	OnLogout      func() string
 	OnSkillsList  func() string
 	OnPluginsList func() string
 	OnHooksList   func() string
@@ -457,6 +459,8 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		OnModelSwitch:       a.OnModelSwitch,
 		OnExport:            a.OnExport,
 		OnResume:            a.OnResume,
+		OnLogin:             a.OnLogin,
+		OnLogout:            a.OnLogout,
 		OnSkillsList:        a.OnSkillsList,
 		OnPluginsList:       a.OnPluginsList,
 		OnHooksList:         a.OnHooksList,

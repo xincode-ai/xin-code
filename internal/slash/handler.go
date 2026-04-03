@@ -3,6 +3,7 @@ package slash
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -169,6 +170,8 @@ func (h *Handler) registerAll() {
 	h.register(cmdVersion())
 	h.register(cmdContext())
 	h.register(cmdTips())
+	h.register(cmdDoctor())
+	h.register(cmdBug())
 	h.register(cmdMCP())
 	h.register(cmdMemory())
 	h.register(cmdSkills())
@@ -198,7 +201,7 @@ func cmdHelp(h *Handler) *Command {
 				{"会话管理", []string{"/session", "/resume", "/compact", "/clear", "/export", "/quit"}},
 				{"模型与配置", []string{"/model", "/provider", "/config", "/login", "/logout", "/permissions", "/cost"}},
 				{"开发工作流", []string{"/commit", "/pr", "/review", "/diff", "/plan", "/test", "/init", "/branch", "/refactor"}},
-				{"系统信息", []string{"/status", "/env", "/version", "/context", "/tips", "/upgrade"}},
+				{"系统信息", []string{"/status", "/env", "/version", "/context", "/tips", "/doctor", "/bug", "/upgrade"}},
 				{"扩展功能", []string{"/mcp", "/memory", "/skills", "/plugins", "/hooks", "/agents", "/team"}},
 			}
 
@@ -806,6 +809,77 @@ func cmdUpgrade() *Command {
 				Type:    ResultDisplay,
 				Content: fmt.Sprintf("当前版本: %s\n请访问 GitHub 检查最新版本: https://github.com/xincode-ai/xin-code/releases", ctx.Version),
 			}
+		},
+	}
+}
+
+func cmdDoctor() *Command {
+	return &Command{
+		Name:        "/doctor",
+		Description: "环境诊断",
+		Handler: func(args []string, ctx *Context) Result {
+			var sb strings.Builder
+			sb.WriteString("🩺 环境诊断\n\n")
+
+			sb.WriteString(fmt.Sprintf("  ✓ Provider:     %s\n", ctx.Provider))
+			sb.WriteString(fmt.Sprintf("  ✓ Model:        %s\n", ctx.Model))
+			sb.WriteString(fmt.Sprintf("  ✓ 权限模式:     %s\n", ctx.PermMode))
+			sb.WriteString(fmt.Sprintf("  ✓ 工作目录:     %s\n", ctx.WorkDir))
+
+			homeDir, _ := os.UserHomeDir()
+			configDir := filepath.Join(homeDir, ".xincode")
+			settingsPath := filepath.Join(configDir, "settings.json")
+			credPath := filepath.Join(configDir, "auth", "credentials.json")
+			checkMark := func(path string) string {
+				if _, err := os.Stat(path); err == nil {
+					return "✓"
+				}
+				return "✗"
+			}
+			sb.WriteString(fmt.Sprintf("  %s settings.json:    %s\n", checkMark(settingsPath), settingsPath))
+			sb.WriteString(fmt.Sprintf("  %s credentials.json: %s\n", checkMark(credPath), credPath))
+
+			gitMark := "✗"
+			if _, err := os.Stat(filepath.Join(ctx.WorkDir, ".git")); err == nil {
+				gitMark = "✓"
+			}
+			sb.WriteString(fmt.Sprintf("  %s git 仓库\n", gitMark))
+
+			xmMark := "✗"
+			if _, err := os.Stat(filepath.Join(ctx.WorkDir, "XINCODE.md")); err == nil {
+				xmMark = "✓"
+			}
+			sb.WriteString(fmt.Sprintf("  %s XINCODE.md\n", xmMark))
+
+			if ctx.MaxContext > 0 {
+				pct := float64(ctx.TotalTokens) / float64(ctx.MaxContext) * 100
+				ctxMark := "✓"
+				if pct > 80 {
+					ctxMark = "⚠"
+				}
+				sb.WriteString(fmt.Sprintf("  %s 上下文:       %.1f%% (%d/%d)\n", ctxMark, pct, ctx.TotalTokens, ctx.MaxContext))
+			}
+
+			return Result{Type: ResultDisplay, Content: sb.String()}
+		},
+	}
+}
+
+func cmdBug() *Command {
+	return &Command{
+		Name:        "/bug",
+		Description: "报告问题",
+		Handler: func(args []string, ctx *Context) Result {
+			var sb strings.Builder
+			sb.WriteString("🐛 报告问题\n\n")
+			sb.WriteString("  请在 GitHub 上提交 Issue：\n")
+			sb.WriteString("  https://github.com/xincode-ai/xin-code/issues/new\n\n")
+			sb.WriteString("  请附上以下信息：\n")
+			sb.WriteString(fmt.Sprintf("  版本:     %s\n", ctx.Version))
+			sb.WriteString(fmt.Sprintf("  模型:     %s\n", ctx.Model))
+			sb.WriteString(fmt.Sprintf("  Provider: %s\n", ctx.Provider))
+			sb.WriteString(fmt.Sprintf("  权限模式: %s\n", ctx.PermMode))
+			return Result{Type: ResultDisplay, Content: sb.String()}
 		},
 	}
 }
