@@ -47,6 +47,7 @@ type Model struct {
 	// 输入态
 	apiKeyInput  textarea.Model
 	baseURLInput textarea.Model
+	modelInput   textarea.Model // custom provider 手动输入模型名
 
 	// 结果
 	result   Result
@@ -70,6 +71,13 @@ func New(configDir string) Model {
 	baseURLTA.ShowLineNumbers = false
 	baseURLTA.CharLimit = 256
 
+	modelTA := textarea.New()
+	modelTA.Placeholder = "模型名称，如 gpt-4.1"
+	modelTA.SetHeight(1)
+	modelTA.MaxHeight = 1
+	modelTA.ShowLineNumbers = false
+	modelTA.CharLimit = 128
+
 	return Model{
 		step:         StepProvider,
 		configDir:    configDir,
@@ -78,6 +86,7 @@ func New(configDir string) Model {
 		modelIdx:     0,
 		apiKeyInput:  apiKeyTA,
 		baseURLInput: baseURLTA,
+		modelInput:   modelTA,
 	}
 }
 
@@ -97,6 +106,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.apiKeyInput.SetWidth(min(60, m.width-10))
 		m.baseURLInput.SetWidth(min(60, m.width-10))
+		m.modelInput.SetWidth(min(60, m.width-10))
 		return m, nil
 
 	case tea.KeyMsg:
@@ -126,6 +136,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.apiKeyInput, cmd = m.apiKeyInput.Update(msg)
 		return m, cmd
+	case StepModel:
+		if len(m.selectedProvider().Models) == 0 {
+			var cmd tea.Cmd
+			m.modelInput, cmd = m.modelInput.Update(msg)
+			return m, cmd
+		}
 	case StepBaseURL:
 		var cmd tea.Cmd
 		m.baseURLInput, cmd = m.baseURLInput.Update(msg)
@@ -190,6 +206,10 @@ func (m Model) updateBaseURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.result.BaseURL = url
 		m.step = StepModel
 		m.modelIdx = 0
+		// custom provider 需要手动输入模型名
+		if len(m.selectedProvider().Models) == 0 {
+			m.modelInput.Focus()
+		}
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -200,10 +220,19 @@ func (m Model) updateBaseURL(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateModel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	models := m.selectedProvider().Models
 	if len(models) == 0 {
-		// custom provider 没有预置模型列表，跳到确认
-		m.result.Model = "gpt-4.1" // 兜底默认
-		m.step = StepConfirm
-		return m, nil
+		// custom provider：用 textarea 输入模型名
+		if msg.Type == tea.KeyEnter && !msg.Alt {
+			name := strings.TrimSpace(m.modelInput.Value())
+			if name == "" {
+				return m, nil
+			}
+			m.result.Model = name
+			m.step = StepConfirm
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.modelInput, cmd = m.modelInput.Update(msg)
+		return m, cmd
 	}
 	switch msg.Type {
 	case tea.KeyUp:
@@ -223,7 +252,7 @@ func (m Model) updateModel(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "y", "Y", "enter":
+	case "y", "Y":
 		// 保存凭证
 		if err := auth.SaveAPIKey(m.configDir, m.result.APIKey); err != nil {
 			m.err = fmt.Errorf("保存凭证失败: %w", err)
@@ -377,7 +406,14 @@ func (m Model) viewModelSelect(bold, dim, hl lipgloss.Style) string {
 	p := m.selectedProvider()
 	models := p.Models
 	if len(models) == 0 {
-		return bold.Render("  无预置模型列表，将使用默认模型")
+		var lines []string
+		lines = append(lines, bold.Render("  输入模型名称"))
+		lines = append(lines, dim.Render("  自定义端点使用的模型 ID"))
+		lines = append(lines, "")
+		lines = append(lines, "  "+m.modelInput.View())
+		lines = append(lines, "")
+		lines = append(lines, dim.Render("  Enter 确认  Esc 取消"))
+		return strings.Join(lines, "\n")
 	}
 	var lines []string
 	lines = append(lines, bold.Render("  选择默认模型")+"  "+dim.Render("↑/↓ 选择  Enter 确认"))
