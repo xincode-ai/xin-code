@@ -16,6 +16,7 @@ import (
 	"github.com/xincode-ai/xin-code/internal/hooks"
 	"github.com/xincode-ai/xin-code/internal/mcp"
 	"github.com/xincode-ai/xin-code/internal/plugins"
+	agentPkg "github.com/xincode-ai/xin-code/internal/agent"
 	"github.com/xincode-ai/xin-code/internal/provider"
 	"github.com/xincode-ai/xin-code/internal/session"
 	"github.com/xincode-ai/xin-code/internal/skills"
@@ -225,6 +226,19 @@ func main() {
 		}
 	}
 
+	// 创建子 Agent 注册表
+	subAgentReg := agentPkg.NewSubAgentRegistry()
+
+	// TUI 事件发送回调（给 SubAgent 用）
+	sendMsg := func(msg interface{}) {
+		if m, ok := msg.(tea.Msg); ok {
+			app.Send(m)
+		}
+	}
+
+	// 权限检查器
+	permChecker := &tool.SimplePermissionChecker{Mode: tool.PermissionMode(cfg.Permission.Mode)}
+
 	// 注册工具（AskUser / DiffPreview 通过 TUI channel 交互）
 	tools := tool.NewRegistry()
 	builtin.RegisterAll(tools, builtin.RegisterConfig{
@@ -248,6 +262,13 @@ func main() {
 				return confirmed, nil
 			}
 		},
+		Provider:    p,
+		Permission:  permChecker,
+		Tracker:     tracker,
+		MaxTokens:   cfg.MaxTokens,
+		Model:       cfg.Model,
+		SendMsg:     sendMsg,
+		SubAgentReg: subAgentReg,
 	})
 
 	// MCP 工具注册
