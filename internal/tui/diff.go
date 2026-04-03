@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -121,22 +122,80 @@ func (d *DiffDialog) respond(confirmed bool) {
 	d.Hide()
 }
 
+// renderDiff 渲染 diff 文本，hunk 级别增删高亮 + 行号显示
 func renderDiff(diffText string) string {
 	lines := strings.Split(diffText, "\n")
 	var rendered []string
+
+	// 行号追踪
+	var oldLine, newLine int
+
 	for _, line := range lines {
 		switch {
-		case strings.HasPrefix(line, "@@"), strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "):
+		case strings.HasPrefix(line, "diff "), strings.HasPrefix(line, "index "):
+			// 文件头：蓝紫色加粗
 			rendered = append(rendered, StyleDiffHeader.Render(line))
-		case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+
+		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "+++"):
+			// 文件路径行：dim 色
 			rendered = append(rendered, StyleDim.Render(line))
+
+		case strings.HasPrefix(line, "@@"):
+			// hunk header：前置空行分隔 + 蓝紫色
+			if len(rendered) > 0 {
+				rendered = append(rendered, "")
+			}
+			rendered = append(rendered, StyleDiffHeader.Render(line))
+			// 从 @@ -old,count +new,count @@ 中解析起始行号
+			oldLine, newLine = parseHunkHeader(line)
+
 		case strings.HasPrefix(line, "+"):
-			rendered = append(rendered, StyleDiffAdd.Render(line))
+			// 新增行：绿色 + 行号
+			lineNum := fmt.Sprintf("%4d ", newLine)
+			rendered = append(rendered, StyleDiffAdd.Render(lineNum+"│ "+line))
+			newLine++
+
 		case strings.HasPrefix(line, "-"):
-			rendered = append(rendered, StyleDiffDel.Render(line))
+			// 删除行：红色 + 行号
+			lineNum := fmt.Sprintf("%4d ", oldLine)
+			rendered = append(rendered, StyleDiffDel.Render(lineNum+"│ "+line))
+			oldLine++
+
 		default:
-			rendered = append(rendered, StyleDiffCtx.Render(line))
+			// 上下文行：dim 色 + 行号
+			if oldLine > 0 || newLine > 0 {
+				lineNum := fmt.Sprintf("%4d ", newLine)
+				rendered = append(rendered, StyleDiffCtx.Render(lineNum+"│ "+line))
+				oldLine++
+				newLine++
+			} else {
+				rendered = append(rendered, StyleDiffCtx.Render(line))
+			}
 		}
 	}
 	return strings.Join(rendered, "\n")
+}
+
+// parseHunkHeader 从 @@ -old,count +new,count @@ 中解析起始行号
+func parseHunkHeader(header string) (oldStart, newStart int) {
+	// 格式: @@ -7,6 +7,8 @@  或  @@ -7 +7,8 @@
+	oldStart, newStart = 1, 1
+	header = strings.TrimPrefix(header, "@@ ")
+	parts := strings.Fields(header)
+	for _, p := range parts {
+		if strings.HasPrefix(p, "-") {
+			p = strings.TrimPrefix(p, "-")
+			if idx := strings.Index(p, ","); idx > 0 {
+				p = p[:idx]
+			}
+			fmt.Sscanf(p, "%d", &oldStart)
+		} else if strings.HasPrefix(p, "+") && !strings.HasPrefix(p, "++") {
+			p = strings.TrimPrefix(p, "+")
+			if idx := strings.Index(p, ","); idx > 0 {
+				p = p[:idx]
+			}
+			fmt.Sscanf(p, "%d", &newStart)
+		}
+	}
+	return
 }
