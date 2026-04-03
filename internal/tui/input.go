@@ -221,6 +221,8 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 			}
 			// 展开粘贴引用为原始内容
 			text = i.expandPasteRefs(text)
+			i.pasteStore = make(map[int]string)
+			i.nextPasteID = 0
 			// 保存到历史
 			i.history = append(i.history, text)
 			i.histIdx = -1
@@ -415,7 +417,9 @@ func (i InputBox) Value() string {
 // Height 返回输入组件当前高度
 func (i InputBox) Height() int {
 	height := i.textarea.Height()
-	if hint := i.renderSlashHint(); hint != "" {
+	if i.searchMode {
+		height += lipgloss.Height(i.renderSearchPanel())
+	} else if hint := i.renderSlashHint(); hint != "" {
 		height += lipgloss.Height(hint)
 	} else if len(i.pathCompletions) > 0 {
 		hint := i.renderPathHint()
@@ -701,13 +705,18 @@ func (i *InputBox) completeFilePath() bool {
 	sort.Strings(matches)
 	var completions []string
 	for _, m := range matches {
-		// 还原 ~/ 前缀
+		// 先用 glob 返回的绝对路径做 Stat（os.Stat 不展开 ~）
+		isDir := false
+		if info, err := os.Stat(m); err == nil && info.IsDir() {
+			isDir = true
+		}
+		// 还原 ~/ 显示前缀
 		if strings.HasPrefix(prefix, "~/") {
 			if home, err := os.UserHomeDir(); err == nil {
 				m = "~/" + strings.TrimPrefix(m, home+"/")
 			}
 		}
-		if info, err := os.Stat(m); err == nil && info.IsDir() {
+		if isDir {
 			m += "/"
 		}
 		completions = append(completions, m)
