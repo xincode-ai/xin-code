@@ -179,7 +179,9 @@ func main() {
 	app.OnCompact = func() string {
 		compacted, msg := session.CompactMessages(sess.Messages)
 		sess.Messages = compacted
-		agent.SyncFromSession() // 同步 agent 运行时历史
+		if agent != nil {
+			agent.SyncFromSession()
+		}
 		return msg
 	}
 	app.OnExport = func() string {
@@ -266,7 +268,9 @@ func main() {
 		sess.AuthSource = loaded.AuthSource
 
 		// ── 2. 同步 Agent 运行时（关键：让后续请求用恢复后的历史和模型）──
-		agent.RestoreSession()
+		if agent != nil {
+			agent.RestoreSession()
+		}
 
 		// ── 3. 同步 TUI 状态栏 / tracker ──
 		tracker.Reset()

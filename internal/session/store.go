@@ -11,14 +11,17 @@ import (
 
 // IndexEntry 会话索引条目
 type IndexEntry struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name,omitempty"`
-	Model     string    `json:"model"`
-	WorkDir   string    `json:"work_dir"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Turns     int       `json:"turns"`
-	CostUSD   float64   `json:"cost_usd"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name,omitempty"`
+	Model      string    `json:"model"`
+	Provider   string    `json:"provider,omitempty"`
+	BaseURL    string    `json:"base_url,omitempty"`
+	AuthSource string    `json:"auth_source,omitempty"`
+	WorkDir    string    `json:"work_dir"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+	Turns      int       `json:"turns"`
+	CostUSD    float64   `json:"cost_usd"`
 }
 
 // Store 会话持久化存储
@@ -123,14 +126,17 @@ func (s *Store) updateIndex(sess *Session) error {
 	// 更新或添加
 	found := false
 	entry := IndexEntry{
-		ID:        sess.ID,
-		Name:      sess.Name,
-		Model:     sess.Model,
-		WorkDir:   sess.WorkDir,
-		CreatedAt: sess.CreatedAt,
-		UpdatedAt: sess.UpdatedAt,
-		Turns:     sess.Turns,
-		CostUSD:   sess.TotalCostUSD,
+		ID:         sess.ID,
+		Name:       sess.Name,
+		Model:      sess.Model,
+		Provider:   sess.Provider,
+		BaseURL:    sess.BaseURL,
+		AuthSource: sess.AuthSource,
+		WorkDir:    sess.WorkDir,
+		CreatedAt:  sess.CreatedAt,
+		UpdatedAt:  sess.UpdatedAt,
+		Turns:      sess.Turns,
+		CostUSD:    sess.TotalCostUSD,
 	}
 
 	for i, e := range entries {

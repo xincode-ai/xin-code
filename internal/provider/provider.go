@@ -20,9 +20,12 @@ type Provider interface {
 	// Name 返回 Provider 标识符，如 "anthropic"、"openai"
 	Name() string
 	// Stream 发起流式对话请求，返回事件 channel
+	// 真实请求模型由 req.Model 决定（非空时覆盖 provider 默认模型）
 	Stream(ctx context.Context, req *Request) (<-chan Event, error)
-	// Capabilities 返回该 Provider 支持的能力
+	// Capabilities 返回该 Provider 支持的能力（基于当前模型）
 	Capabilities() Capabilities
+	// SetModel 更新 provider 的默认模型（影响 Capabilities 和无 req.Model 时的兜底）
+	SetModel(model string)
 }
 
 // SystemBlock 系统提示词块（支持 cache_control）

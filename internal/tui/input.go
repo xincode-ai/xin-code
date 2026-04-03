@@ -110,6 +110,7 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 			// Alt+Enter 换行
 			if msg.Alt {
 				i.textarea.InsertString("\n")
+				i.syncHeight()
 				return i, nil
 			}
 			// 补全列表可见且有选中项：补全并提交该命令
@@ -160,10 +161,9 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 			}
 
 		case tea.KeyDown:
-			// 补全列表导航：向下
+			// 补全列表导航：向下（允许选到所有匹配项，渲染时自动滚动）
 			if i.hasActiveCompletion() {
-				maxIdx := min(len(i.completionItems)-1, 7)
-				if i.completionIdx < maxIdx {
+				if i.completionIdx < len(i.completionItems)-1 {
 					i.completionIdx++
 				}
 				return i, nil
@@ -192,6 +192,9 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 
 	var cmd tea.Cmd
 	i.textarea, cmd = i.textarea.Update(msg)
+
+	// 内容变化后同步高度（让输入框随换行自动撑开）
+	i.syncHeight()
 
 	// 同步补全状态
 	newMatches := i.matchSlashCommands()
@@ -232,6 +235,21 @@ func (i *InputBox) Blur() {
 // Reset 清空输入框
 func (i *InputBox) Reset() {
 	i.textarea.Reset()
+	i.textarea.SetHeight(1)
+}
+
+// syncHeight 根据内容行数动态调整 textarea 高度（1~MaxHeight）
+func (i *InputBox) syncHeight() {
+	content := i.textarea.Value()
+	lines := strings.Count(content, "\n") + 1
+	h := lines
+	if h < 1 {
+		h = 1
+	}
+	if h > i.textarea.MaxHeight {
+		h = i.textarea.MaxHeight
+	}
+	i.textarea.SetHeight(h)
 }
 
 // Value 获取当前值
@@ -261,9 +279,28 @@ func (i InputBox) renderSlashHint() string {
 	}
 
 	boxWidth := min(72, max(34, i.width-2))
+	maxVisible := 8
+
+	// 滑动视口：确保 completionIdx 在可见范围内
+	start := 0
+	if i.completionIdx >= maxVisible {
+		start = i.completionIdx - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > len(matches) {
+		end = len(matches)
+		start = max(0, end-maxVisible)
+	}
+
 	var lines []string
-	limit := min(8, len(matches))
-	for idx, cmd := range matches[:limit] {
+
+	// 上方滚动指示
+	if start > 0 {
+		lines = append(lines, StyleDim.Render(fmt.Sprintf("  ↑ 还有 %d 个命令", start)))
+	}
+
+	for idx := start; idx < end; idx++ {
+		cmd := matches[idx]
 		name := truncateText(cmd.Name, 16)
 		desc := truncateText(cmd.Description, max(12, boxWidth-24))
 		if idx == i.completionIdx {
@@ -276,9 +313,12 @@ func (i InputBox) renderSlashHint() string {
 			lines = append(lines, "  "+line)
 		}
 	}
-	if len(matches) > limit {
-		lines = append(lines, StyleDim.Render(fmt.Sprintf("  还有 %d 个命令", len(matches)-limit)))
+
+	// 下方滚动指示
+	if end < len(matches) {
+		lines = append(lines, StyleDim.Render(fmt.Sprintf("  ↓ 还有 %d 个命令", len(matches)-end)))
 	}
+
 	lines = append(lines, StyleDim.Render("  Tab 补全 · Enter 执行 · ↑↓ 选择"))
 
 	return lipgloss.NewStyle().

@@ -20,22 +20,39 @@ type Session struct {
 	Messages  []provider.Message `json:"messages"`
 	Turns     int                `json:"turns"`
 
+	// 运行环境元数据（/resume 兼容性判断用，omitempty 兼容旧会话）
+	Provider   string `json:"provider,omitempty"`
+	BaseURL    string `json:"base_url,omitempty"`
+	AuthSource string `json:"auth_source,omitempty"`
+
 	// 费用信息
 	TotalInputTokens  int     `json:"total_input_tokens"`
 	TotalOutputTokens int     `json:"total_output_tokens"`
 	TotalCostUSD      float64 `json:"total_cost_usd"`
 }
 
-// NewSession 创建新会话
-func NewSession(model, workDir string) *Session {
+// SessionConfig 创建会话所需的运行环境配置
+type SessionConfig struct {
+	Model      string
+	WorkDir    string
+	Provider   string
+	BaseURL    string
+	AuthSource string
+}
+
+// NewSession 创建新会话（带完整运行环境元数据）
+func NewSession(cfg SessionConfig) *Session {
 	now := time.Now()
 	return &Session{
-		ID:        generateID(now),
-		Model:     model,
-		WorkDir:   workDir,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Messages:  make([]provider.Message, 0),
+		ID:         generateID(now),
+		Model:      cfg.Model,
+		WorkDir:    cfg.WorkDir,
+		Provider:   cfg.Provider,
+		BaseURL:    cfg.BaseURL,
+		AuthSource: cfg.AuthSource,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		Messages:   make([]provider.Message, 0),
 	}
 }
 

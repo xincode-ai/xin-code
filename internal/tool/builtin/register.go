@@ -14,14 +14,14 @@ type RegisterConfig struct {
 	AskFunc     func(ctx context.Context, question string) (string, error)
 	ConfirmFunc func(ctx context.Context, path string, diffText string) (bool, error)
 
-	// SubAgent 相关依赖
-	Provider    provider.Provider
-	Permission  tool.PermissionChecker
-	Tracker     *cost.Tracker
-	MaxTokens   int
-	Model       string
-	SendMsg     func(interface{})
-	SubAgentReg *agentPkg.SubAgentRegistry
+	// SubAgent 相关依赖（Provider/Model 用 getter 动态读取，/resume 后自动跟随）
+	CurrentProvider func() provider.Provider
+	CurrentModel    func() string
+	Permission      tool.PermissionChecker
+	Tracker         *cost.Tracker
+	MaxTokens       int
+	SendMsg         func(interface{})
+	SubAgentReg     *agentPkg.SubAgentRegistry
 }
 
 // RegisterAll 注册所有内置工具
@@ -42,16 +42,16 @@ func RegisterAll(reg *tool.Registry, cfg RegisterConfig) {
 	reg.Register(&AskUserTool{AskFunc: cfg.AskFunc})
 	reg.Register(&TaskTool{})
 
-	// SubAgent 工具
+	// SubAgent 工具（Provider/Model 通过 getter 动态读取）
 	reg.Register(&AgentTool{
-		Provider:    cfg.Provider,
-		Tools:       reg,
-		Permission:  cfg.Permission,
-		Tracker:     cfg.Tracker,
-		MaxTokens:   cfg.MaxTokens,
-		Model:       cfg.Model,
-		SendMsg:     cfg.SendMsg,
-		SubAgentReg: cfg.SubAgentReg,
+		CurrentProvider: cfg.CurrentProvider,
+		CurrentModel:    cfg.CurrentModel,
+		Tools:           reg,
+		Permission:      cfg.Permission,
+		Tracker:         cfg.Tracker,
+		MaxTokens:       cfg.MaxTokens,
+		SendMsg:         cfg.SendMsg,
+		SubAgentReg:     cfg.SubAgentReg,
 	})
 	reg.Register(&SendMessageTool{
 		SubAgentReg: cfg.SubAgentReg,

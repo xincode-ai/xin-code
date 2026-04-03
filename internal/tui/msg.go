@@ -101,3 +101,22 @@ type MsgWindowSize struct {
 	Width  int
 	Height int
 }
+
+// MsgResumeEntries 打开会话恢复选择器（携带结构化数据）
+type MsgResumeEntries struct {
+	Entries []ResumeEntry
+}
+
+// MsgResumeChosen 用户选中了要恢复的会话
+type MsgResumeChosen struct {
+	SessionID string
+}
+
+// MsgOpenPanel 打开可滚动文本面板
+type MsgOpenPanel struct {
+	Title   string
+	Content string
+}
+
+// MsgClosePanel 关闭文本面板
+type MsgClosePanel struct{}

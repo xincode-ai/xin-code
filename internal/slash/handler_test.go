@@ -16,8 +16,8 @@ func TestHandleHelp(t *testing.T) {
 	if !handled {
 		t.Fatal("/help 应被处理")
 	}
-	if result.Type != ResultDisplay {
-		t.Errorf("结果类型应为 display: got %s", result.Type)
+	if result.Type != ResultPanel {
+		t.Errorf("结果类型应为 panel: got %s", result.Type)
 	}
 	if !strings.Contains(result.Content, "命令列表") {
 		t.Error("帮助内容应包含命令列表")
@@ -47,15 +47,10 @@ func TestHandleModel(t *testing.T) {
 		t.Error("应显示当前模型")
 	}
 
-	// 有参数：切换模型
-	switched := false
-	ctx.OnModelSwitch = func(m string) { switched = true }
+	// 有参数：提示不支持热切换
 	result, _ = h.Handle("/model gpt-4o", ctx)
-	if !switched {
-		t.Error("应调用 OnModelSwitch")
-	}
-	if !strings.Contains(result.Content, "gpt-4o") {
-		t.Error("切换确认应包含新模型名")
+	if !strings.Contains(result.Content, "暂不支持") {
+		t.Error("应提示不支持会话中热切换")
 	}
 }
 
@@ -193,6 +188,41 @@ func TestAllCommands(t *testing.T) {
 		if cmds[i].Name < cmds[i-1].Name {
 			t.Errorf("命令未按名称排序: %s < %s", cmds[i].Name, cmds[i-1].Name)
 		}
+	}
+}
+
+func TestIsReadOnlySafe(t *testing.T) {
+	h := NewHandler()
+
+	// 安全命令（只读模式允许执行）
+	safeCommands := []string{
+		"/help", "/session", "/resume", "/export", "/quit", "/exit",
+		"/model", "/provider", "/config", "/permissions", "/cost", "/status",
+		"/env", "/version", "/context", "/tips", "/doctor", "/bug",
+		"/mcp", "/memory", "/skills", "/plugins", "/hooks", "/agents", "/team",
+		"/theme dark", "/upgrade",
+	}
+	for _, cmd := range safeCommands {
+		if !h.IsReadOnlySafe(cmd) {
+			t.Errorf("%q 应为 ReadOnlySafe", cmd)
+		}
+	}
+
+	// 危险命令（只读模式禁止执行）
+	unsafeCommands := []string{
+		"/clear", "/compact", "/login", "/logout",
+		"/commit", "/pr", "/review", "/diff", "/plan", "/test",
+		"/init", "/branch", "/refactor",
+	}
+	for _, cmd := range unsafeCommands {
+		if h.IsReadOnlySafe(cmd) {
+			t.Errorf("%q 不应为 ReadOnlySafe", cmd)
+		}
+	}
+
+	// 未知命令 → 安全（只会显示"未知命令"提示）
+	if !h.IsReadOnlySafe("/nonexistent") {
+		t.Error("未知命令应视为安全")
 	}
 }
 

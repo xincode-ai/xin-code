@@ -35,6 +35,8 @@ func NewOpenAIProvider(apiKey, model, baseURL string) (*OpenAIProvider, error) {
 
 func (p *OpenAIProvider) Name() string { return "openai" }
 
+func (p *OpenAIProvider) SetModel(model string) { p.model = model }
+
 func (p *OpenAIProvider) Capabilities() Capabilities {
 	maxCtx := 128000
 	// o 系列模型上下文更大
@@ -66,9 +68,15 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event
 	// 转换消息格式
 	messages := convertToOpenAIMessages(req.Messages, systemPrompt)
 
+	// 模型优先级：req.Model > p.model（消除双真源）
+	model := p.model
+	if req.Model != "" {
+		model = req.Model
+	}
+
 	// 构建 API 参数
 	params := openai.ChatCompletionNewParams{
-		Model:    shared.ChatModel(p.model),
+		Model:    shared.ChatModel(model),
 		Messages: messages,
 	}
 	if req.MaxTokens > 0 {

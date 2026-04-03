@@ -144,3 +144,14 @@ func (t *Tracker) SetCurrency(currency string) {
 	defer t.mu.Unlock()
 	t.currency = currency
 }
+
+// Reset 重置所有累计数据（用于恢复会话时重建状态）
+func (t *Tracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.totalInput = 0
+	t.totalOutput = 0
+	t.totalCacheCreation = 0
+	t.totalCacheRead = 0
+	t.totalCostUSD = 0
+}

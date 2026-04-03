@@ -10,7 +10,7 @@ func TestStoreSaveLoad(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewStore(tmpDir)
 
-	sess := NewSession("test-model", "/tmp/project")
+	sess := NewSession(SessionConfig{Model: "test-model", WorkDir: "/tmp/project", Provider: "anthropic"})
 	sess.Name = "测试会话"
 
 	// 保存
@@ -35,13 +35,80 @@ func TestStoreSaveLoad(t *testing.T) {
 	}
 }
 
+func TestStoreRoundTripRuntimeMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewStore(tmpDir)
+
+	sess := NewSession(SessionConfig{
+		Model:      "claude-opus-4-6",
+		WorkDir:    "/tmp/project",
+		Provider:   "anthropic",
+		BaseURL:    "https://custom.api.com",
+		AuthSource: "cc-oauth",
+	})
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	loaded, err := store.Load(sess.ID)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if loaded.Provider != "anthropic" {
+		t.Errorf("Provider round-trip 失败: got %q", loaded.Provider)
+	}
+	if loaded.BaseURL != "https://custom.api.com" {
+		t.Errorf("BaseURL round-trip 失败: got %q", loaded.BaseURL)
+	}
+	if loaded.AuthSource != "cc-oauth" {
+		t.Errorf("AuthSource round-trip 失败: got %q", loaded.AuthSource)
+	}
+
+	// 验证 index 中也有 Provider
+	entries, _ := store.List("")
+	if len(entries) != 1 {
+		t.Fatalf("索引应有 1 条: got %d", len(entries))
+	}
+	if entries[0].Provider != "anthropic" {
+		t.Errorf("索引 Provider 不匹配: got %q", entries[0].Provider)
+	}
+}
+
+func TestStoreBackwardCompatOldSession(t *testing.T) {
+	// 模拟旧版 session JSON（无 Provider/BaseURL/AuthSource）
+	tmpDir := t.TempDir()
+	store := NewStore(tmpDir)
+
+	// 先保存一个旧格式会话（不含新字段）
+	sess := NewSession(SessionConfig{Model: "old-model", WorkDir: "/tmp"})
+	// 手动清空新字段模拟旧数据
+	sess.Provider = ""
+	sess.BaseURL = ""
+	sess.AuthSource = ""
+	if err := store.Save(sess); err != nil {
+		t.Fatalf("保存失败: %v", err)
+	}
+
+	// 加载应成功，新字段为空
+	loaded, err := store.Load(sess.ID)
+	if err != nil {
+		t.Fatalf("旧会话加载失败: %v", err)
+	}
+	if loaded.Provider != "" {
+		t.Errorf("旧会话 Provider 应为空: got %q", loaded.Provider)
+	}
+	if loaded.Model != "old-model" {
+		t.Errorf("旧会话 Model 不匹配: got %q", loaded.Model)
+	}
+}
+
 func TestStoreList(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewStore(tmpDir)
 
 	// 创建多个会话
-	sess1 := NewSession("model1", "/project/a")
-	sess2 := NewSession("model2", "/project/b")
+	sess1 := NewSession(SessionConfig{Model: "model1", WorkDir: "/project/a"})
+	sess2 := NewSession(SessionConfig{Model: "model2", WorkDir: "/project/b"})
 	sess2.ID = sess2.ID + "-2" // 确保 ID 不同
 
 	_ = store.Save(sess1)
@@ -70,7 +137,7 @@ func TestStoreDelete(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewStore(tmpDir)
 
-	sess := NewSession("model", "/tmp")
+	sess := NewSession(SessionConfig{Model: "model", WorkDir: "/tmp"})
 	_ = store.Save(sess)
 
 	// 删除

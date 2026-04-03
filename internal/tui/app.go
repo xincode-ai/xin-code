@@ -382,6 +382,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+		// AI 回答中：拦截提交，保留输入内容让用户继续编辑
+		if a.state == StateQuery || a.state == StateToolExec {
+			a.showEphemeralNotice("AI 正在回答中，请等待完成后再发送")
+			return a, nil
+		}
+
 		a.chat, _ = a.chat.Update(msg)
 		a.state = StateQuery
 		submitCmd := func() tea.Msg {
@@ -494,6 +500,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case MsgSpinnerTick:
 		a.ccSpinner.Tick()
 		a.chat, _ = a.chat.Update(msg) // 转发给 chat 驱动工具闪烁
+		// 权限卡片按键反馈老化
+		if a.permission.IsVisible() {
+			a.permission, _ = a.permission.Update(msg)
+		}
 		// 临时通知老化
 		if a.ephemeralNotice != "" {
 			a.ephemeralNoticeAge++
@@ -505,7 +515,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 	}
 
-	if a.state == StateInput || a.state == StateAskUser {
+	// 输入框在大多数状态下都接收按键（允许用户在 AI 回答时预先打字）
+	// 只有 modal 层状态（Permission/DiffPreview/ResumeSelect/Panel）不转发
+	switch a.state {
+	case StateInput, StateAskUser, StateQuery, StateToolExec:
 		var cmd tea.Cmd
 		a.input, cmd = a.input.Update(msg)
 		a.resizeLayout()

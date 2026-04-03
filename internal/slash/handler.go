@@ -1,6 +1,7 @@
 package slash
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,9 +15,11 @@ import (
 type ResultType string
 
 const (
-	ResultDisplay ResultType = "display" // 显示文本
-	ResultPrompt  ResultType = "prompt"  // 发送预设 prompt 给 Agent
-	ResultAction  ResultType = "action"  // 执行内部动作（如退出、清屏）
+	ResultNotice   ResultType = "notice"   // 短提示（临时通知，~10 秒消失）
+	ResultPanel    ResultType = "panel"    // 长文本（可滚动面板，Esc 关闭）
+	ResultSelector ResultType = "selector" // 打开选择器（如 /resume）
+	ResultPrompt   ResultType = "prompt"   // 发送预设 prompt 给 Agent
+	ResultAction   ResultType = "action"   // 执行内部动作（如退出、清屏）
 )
 
 // Result 斜杠命令执行结果
@@ -25,11 +28,25 @@ type Result struct {
 	Content string
 }
 
+// ResumeEntryData 历史会话条目（slash 层传递数据用）
+type ResumeEntryData struct {
+	ID         string
+	Model      string
+	Provider   string
+	BaseURL    string
+	AuthSource string
+	Turns      int
+	Cost       string
+	Mode       string // "continue" / "readonly" / "blocked"
+	ModeReason string
+}
+
 // Command 斜杠命令定义
 type Command struct {
-	Name        string
-	Description string
-	Handler     func(args []string, ctx *Context) Result
+	Name         string
+	Description  string
+	ReadOnlySafe bool // true = 只读浏览模式下允许执行（纯查询/展示）
+	Handler      func(args []string, ctx *Context) Result
 }
 
 // Context 命令执行上下文（由 TUI/Agent 注入）
@@ -63,7 +80,7 @@ type Context struct {
 	OnCompact     func() string    // /compact
 	OnModelSwitch func(string)     // /model <name>
 	OnExport      func() string    // /export
-	OnResume      func() string    // /resume
+	OnResume      func() ([]ResumeEntryData, error) // /resume
 	OnLogin       func() string    // /login
 	OnLogout      func() string    // /logout
 	OnMCPList     func() string    // /mcp
@@ -101,12 +118,25 @@ func (h *Handler) Handle(input string, ctx *Context) (Result, bool) {
 	cmd, ok := h.commands[cmdName]
 	if !ok {
 		return Result{
-			Type:    ResultDisplay,
+			Type:    ResultNotice,
 			Content: fmt.Sprintf("未知命令: %s\n输入 /help 查看可用命令", cmdName),
 		}, true
 	}
 
 	return cmd.Handler(args, ctx), true
+}
+
+// IsReadOnlySafe 检查给定的 slash 输入在只读模式下是否允许执行
+func (h *Handler) IsReadOnlySafe(input string) bool {
+	parts := strings.Fields(strings.TrimSpace(input))
+	if len(parts) == 0 {
+		return false
+	}
+	cmd, ok := h.commands[parts[0]]
+	if !ok {
+		return true // 未知命令会走到 "未知命令" 提示，不修改状态
+	}
+	return cmd.ReadOnlySafe
 }
 
 // AllCommands 返回所有命令（按名称排序）
@@ -190,8 +220,9 @@ func (h *Handler) registerAll() {
 
 func cmdHelp(h *Handler) *Command {
 	return &Command{
-		Name:        "/help",
-		Description: "帮助信息",
+		Name:         "/help",
+		Description:  "帮助信息",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("⚡ Xin Code 命令列表\n\n")
@@ -218,15 +249,16 @@ func cmdHelp(h *Handler) *Command {
 			}
 
 			sb.WriteString("快捷键: Ctrl+C 中断/退出  Ctrl+L 清屏")
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdSession() *Command {
 	return &Command{
-		Name:        "/session",
-		Description: "当前会话信息",
+		Name:         "/session",
+		Description:  "当前会话信息",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("📋 会话信息\n\n")
@@ -242,21 +274,30 @@ func cmdSession() *Command {
 				sb.WriteString(fmt.Sprintf("  上下文:   %d / %d (%.1f%%)\n", ctx.TotalTokens, ctx.MaxContext, pct))
 			}
 
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdResume() *Command {
 	return &Command{
-		Name:        "/resume",
-		Description: "恢复历史会话",
+		Name:         "/resume",
+		Description:  "恢复历史会话",
+		ReadOnlySafe: true, // 允许重新选择会话
 		Handler: func(args []string, ctx *Context) Result {
-			if ctx.OnResume != nil {
-				msg := ctx.OnResume()
-				return Result{Type: ResultDisplay, Content: msg}
+			if ctx.OnResume == nil {
+				return Result{Type: ResultNotice, Content: "会话恢复功能未就绪"}
 			}
-			return Result{Type: ResultDisplay, Content: "暂不支持会话恢复"}
+			entries, err := ctx.OnResume()
+			if err != nil {
+				return Result{Type: ResultNotice, Content: fmt.Sprintf("获取历史会话失败: %s", err)}
+			}
+			if len(entries) == 0 {
+				return Result{Type: ResultNotice, Content: "当前目录没有历史会话"}
+			}
+			// 序列化为 JSON 传递给 TUI 层
+			data, _ := json.Marshal(entries)
+			return Result{Type: ResultSelector, Content: string(data)}
 		},
 	}
 }
@@ -268,9 +309,9 @@ func cmdCompact() *Command {
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnCompact != nil {
 				msg := ctx.OnCompact()
-				return Result{Type: ResultDisplay, Content: "⚡ " + msg}
+				return Result{Type: ResultNotice, Content: "⚡ " + msg}
 			}
-			return Result{Type: ResultDisplay, Content: "压缩功能未就绪"}
+			return Result{Type: ResultNotice, Content: "压缩功能未就绪"}
 		},
 	}
 }
@@ -290,22 +331,24 @@ func cmdClear() *Command {
 
 func cmdExport() *Command {
 	return &Command{
-		Name:        "/export",
-		Description: "导出会话为 Markdown",
+		Name:         "/export",
+		Description:  "导出会话为 Markdown",
+		ReadOnlySafe: true, // 只读导出，不修改会话
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnExport != nil {
 				msg := ctx.OnExport()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultNotice, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "导出功能未就绪"}
+			return Result{Type: ResultNotice, Content: "导出功能未就绪"}
 		},
 	}
 }
 
 func cmdQuit() *Command {
 	return &Command{
-		Name:        "/quit",
-		Description: "退出",
+		Name:         "/quit",
+		Description:  "退出",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			return Result{Type: ResultAction, Content: "quit"}
 		},
@@ -314,8 +357,9 @@ func cmdQuit() *Command {
 
 func cmdExit() *Command {
 	return &Command{
-		Name:        "/exit",
-		Description: "退出",
+		Name:         "/exit",
+		Description:  "退出",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			return Result{Type: ResultAction, Content: "quit"}
 		},
@@ -326,35 +370,34 @@ func cmdExit() *Command {
 
 func cmdModel() *Command {
 	return &Command{
-		Name:        "/model",
-		Description: "显示/切换模型",
+		Name:         "/model",
+		Description:  "显示/切换模型",
+		ReadOnlySafe: true, // 当前只支持查询，不实际切换
 		Handler: func(args []string, ctx *Context) Result {
 			if len(args) > 0 {
-				newModel := args[0]
-				if ctx.OnModelSwitch != nil {
-					ctx.OnModelSwitch(newModel)
-				}
-				return Result{Type: ResultDisplay, Content: fmt.Sprintf("已切换模型: %s", newModel)}
+				return Result{Type: ResultNotice, Content: "当前版本暂不支持会话中热切换模型。\n请退出后修改配置或设置 XINCODE_MODEL 环境变量。"}
 			}
-			return Result{Type: ResultDisplay, Content: fmt.Sprintf("当前模型: %s", ctx.Model)}
+			return Result{Type: ResultNotice, Content: fmt.Sprintf("当前模型: %s", ctx.Model)}
 		},
 	}
 }
 
 func cmdProvider() *Command {
 	return &Command{
-		Name:        "/provider",
-		Description: "显示当前 Provider",
+		Name:         "/provider",
+		Description:  "显示当前 Provider",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
-			return Result{Type: ResultDisplay, Content: fmt.Sprintf("当前 Provider: %s", ctx.Provider)}
+			return Result{Type: ResultNotice, Content: fmt.Sprintf("当前 Provider: %s", ctx.Provider)}
 		},
 	}
 }
 
 func cmdConfig() *Command {
 	return &Command{
-		Name:        "/config",
-		Description: "显示当前配置",
+		Name:         "/config",
+		Description:  "显示当前配置",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("⚙ 当前配置\n\n")
@@ -363,7 +406,7 @@ func cmdConfig() *Command {
 			sb.WriteString(fmt.Sprintf("  权限模式: %s\n", ctx.PermMode))
 			sb.WriteString(fmt.Sprintf("  货币:     %s\n", ctx.Currency))
 			sb.WriteString(fmt.Sprintf("  最大上下文: %d\n", ctx.MaxContext))
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
@@ -375,9 +418,9 @@ func cmdLogin() *Command {
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnLogin != nil {
 				msg := ctx.OnLogin()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultNotice, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "请设置环境变量: export XINCODE_API_KEY=your-key"}
+			return Result{Type: ResultNotice, Content: "请设置环境变量: export XINCODE_API_KEY=your-key"}
 		},
 	}
 }
@@ -389,17 +432,18 @@ func cmdLogout() *Command {
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnLogout != nil {
 				msg := ctx.OnLogout()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultNotice, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "认证信息已清除"}
+			return Result{Type: ResultNotice, Content: "认证信息已清除"}
 		},
 	}
 }
 
 func cmdPermissions() *Command {
 	return &Command{
-		Name:        "/permissions",
-		Description: "显示权限模式",
+		Name:         "/permissions",
+		Description:  "显示权限模式",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("🔒 权限配置\n\n")
@@ -410,15 +454,16 @@ func cmdPermissions() *Command {
 			sb.WriteString("    default      只读放行，写入询问（推荐）\n")
 			sb.WriteString("    plan         只读放行，写入拒绝\n")
 			sb.WriteString("    interactive  所有工具都询问\n")
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdCost() *Command {
 	return &Command{
-		Name:        "/cost",
-		Description: "费用详情",
+		Name:         "/cost",
+		Description:  "费用详情",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("💰 费用详情\n\n")
@@ -434,15 +479,16 @@ func cmdCost() *Command {
 				}
 			}
 			sb.WriteString(fmt.Sprintf("\n  总费用: %s\n", ctx.CostString))
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdStatus() *Command {
 	return &Command{
-		Name:        "/status",
-		Description: "环境信息",
+		Name:         "/status",
+		Description:  "环境信息",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("📊 环境信息\n\n")
@@ -455,7 +501,7 @@ func cmdStatus() *Command {
 				pct := float64(ctx.TotalTokens) / float64(ctx.MaxContext) * 100
 				sb.WriteString(fmt.Sprintf("  上下文:     %d / %d (%.1f%%)\n", ctx.TotalTokens, ctx.MaxContext, pct))
 			}
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
@@ -519,7 +565,7 @@ func cmdPlan() *Command {
 		Name:        "/plan",
 		Description: "切换到计划模式",
 		Handler: func(args []string, ctx *Context) Result {
-			return Result{Type: ResultDisplay, Content: "已切换到 plan 模式（只读，不执行写入操作）"}
+			return Result{Type: ResultNotice, Content: "已切换到 plan 模式（只读，不执行写入操作）"}
 		},
 	}
 }
@@ -558,8 +604,9 @@ func cmdInit() *Command {
 
 func cmdEnv() *Command {
 	return &Command{
-		Name:        "/env",
-		Description: "环境变量",
+		Name:         "/env",
+		Description:  "环境变量",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("🌍 相关环境变量\n\n")
@@ -571,25 +618,27 @@ func cmdEnv() *Command {
 				val := maskEnvValue(key)
 				sb.WriteString(fmt.Sprintf("  %-28s %s\n", key, val))
 			}
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdVersion() *Command {
 	return &Command{
-		Name:        "/version",
-		Description: "版本信息",
+		Name:         "/version",
+		Description:  "版本信息",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
-			return Result{Type: ResultDisplay, Content: fmt.Sprintf("xin-code %s", ctx.Version)}
+			return Result{Type: ResultNotice, Content: fmt.Sprintf("xin-code %s", ctx.Version)}
 		},
 	}
 }
 
 func cmdContext() *Command {
 	return &Command{
-		Name:        "/context",
-		Description: "上下文使用详情",
+		Name:         "/context",
+		Description:  "上下文使用详情",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("📊 上下文使用详情\n\n")
@@ -614,7 +663,7 @@ func cmdContext() *Command {
 					sb.WriteString("\n  ⚠ 上下文使用率较高")
 				}
 			}
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
@@ -635,12 +684,13 @@ func cmdTips() *Command {
 
 	tipIndex := 0
 	return &Command{
-		Name:        "/tips",
-		Description: "使用技巧",
+		Name:         "/tips",
+		Description:  "使用技巧",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			tip := tips[tipIndex%len(tips)]
 			tipIndex++
-			return Result{Type: ResultDisplay, Content: fmt.Sprintf("💡 %s", tip)}
+			return Result{Type: ResultNotice, Content: fmt.Sprintf("💡 %s", tip)}
 		},
 	}
 }
@@ -668,31 +718,33 @@ func getEnv(key string) string {
 
 func cmdMCP() *Command {
 	return &Command{
-		Name:        "/mcp",
-		Description: "MCP 服务器和工具列表",
+		Name:         "/mcp",
+		Description:  "MCP 服务器和工具列表",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnMCPList != nil {
 				msg := ctx.OnMCPList()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultPanel, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "未配置 MCP 服务器"}
+			return Result{Type: ResultNotice, Content: "未配置 MCP 服务器"}
 		},
 	}
 }
 
 func cmdMemory() *Command {
 	return &Command{
-		Name:        "/memory",
-		Description: "查看和管理记忆",
+		Name:         "/memory",
+		Description:  "查看和管理记忆",
+		ReadOnlySafe: true, // 当前只有查看功能
 		Handler: func(args []string, ctx *Context) Result {
 			homeDir, _ := os.UserHomeDir()
 			memDir := memory.GetMemoryDir(homeDir, ctx.WorkDir)
 			memories, err := memory.ScanMemoryDir(memDir)
 			if err != nil {
-				return Result{Type: ResultDisplay, Content: fmt.Sprintf("读取记忆失败: %s", err)}
+				return Result{Type: ResultNotice, Content: fmt.Sprintf("读取记忆失败: %s", err)}
 			}
 			if len(memories) == 0 {
-				return Result{Type: ResultDisplay, Content: fmt.Sprintf("暂无记忆。\n记忆目录: %s\n\n模型可以在对话中自动创建和更新记忆。", memDir)}
+				return Result{Type: ResultNotice, Content: fmt.Sprintf("暂无记忆。\n记忆目录: %s\n\n模型可以在对话中自动创建和更新记忆。", memDir)}
 			}
 
 			var sb strings.Builder
@@ -709,69 +761,74 @@ func cmdMemory() *Command {
 				sb.WriteString(fmt.Sprintf("  [%s] %s — %s\n", typeTag, m.Name, desc))
 			}
 			sb.WriteString(fmt.Sprintf("\n目录: %s", memDir))
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdSkills() *Command {
 	return &Command{
-		Name:        "/skills",
-		Description: "已加载的技能列表",
+		Name:         "/skills",
+		Description:  "已加载的技能列表",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnSkillsList != nil {
 				msg := ctx.OnSkillsList()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultPanel, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "技能系统未初始化"}
+			return Result{Type: ResultNotice, Content: "技能系统未初始化"}
 		},
 	}
 }
 
 func cmdPlugins() *Command {
 	return &Command{
-		Name:        "/plugins",
-		Description: "已加载的插件列表",
+		Name:         "/plugins",
+		Description:  "已加载的插件列表",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnPluginsList != nil {
 				msg := ctx.OnPluginsList()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultPanel, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "插件系统未初始化"}
+			return Result{Type: ResultNotice, Content: "插件系统未初始化"}
 		},
 	}
 }
 
 func cmdHooks() *Command {
 	return &Command{
-		Name:        "/hooks",
-		Description: "已配置的钩子列表",
+		Name:         "/hooks",
+		Description:  "已配置的钩子列表",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			if ctx.OnHooksList != nil {
 				msg := ctx.OnHooksList()
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultPanel, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "钩子系统未初始化"}
+			return Result{Type: ResultNotice, Content: "钩子系统未初始化"}
 		},
 	}
 }
 
 func cmdAgents() *Command {
 	return &Command{
-		Name:        "/agents",
-		Description: "多 Agent 协作",
+		Name:         "/agents",
+		Description:  "多 Agent 协作",
+		ReadOnlySafe: true, // 当前只是 stub
 		Handler: func(args []string, ctx *Context) Result {
-			return Result{Type: ResultDisplay, Content: "多 Agent 协作将在 v1.1 中实现"}
+			return Result{Type: ResultNotice, Content: "多 Agent 协作将在 v1.1 中实现"}
 		},
 	}
 }
 
 func cmdTeam() *Command {
 	return &Command{
-		Name:        "/team",
-		Description: "团队功能",
+		Name:         "/team",
+		Description:  "团队功能",
+		ReadOnlySafe: true, // 当前只是 stub
 		Handler: func(args []string, ctx *Context) Result {
-			return Result{Type: ResultDisplay, Content: "团队功能将在 v1.1 中实现"}
+			return Result{Type: ResultNotice, Content: "团队功能将在 v1.1 中实现"}
 		},
 	}
 }
@@ -804,11 +861,12 @@ func cmdRefactor() *Command {
 
 func cmdUpgrade() *Command {
 	return &Command{
-		Name:        "/upgrade",
-		Description: "检查更新",
+		Name:         "/upgrade",
+		Description:  "检查更新",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			return Result{
-				Type:    ResultDisplay,
+				Type:    ResultNotice,
 				Content: fmt.Sprintf("当前版本: %s\n请访问 GitHub 检查最新版本: https://github.com/xincode-ai/xin-code/releases", ctx.Version),
 			}
 		},
@@ -817,8 +875,9 @@ func cmdUpgrade() *Command {
 
 func cmdDoctor() *Command {
 	return &Command{
-		Name:        "/doctor",
-		Description: "环境诊断",
+		Name:         "/doctor",
+		Description:  "环境诊断",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("🩺 环境诊断\n\n")
@@ -862,36 +921,38 @@ func cmdDoctor() *Command {
 				sb.WriteString(fmt.Sprintf("  %s 上下文:       %.1f%% (%d/%d)\n", ctxMark, pct, ctx.TotalTokens, ctx.MaxContext))
 			}
 
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }
 
 func cmdTheme() *Command {
 	return &Command{
-		Name:        "/theme",
-		Description: "切换主题 (dark/light)",
+		Name:         "/theme",
+		Description:  "切换主题 (dark/light)",
+		ReadOnlySafe: true, // 只改内存 UI 样式，不修改会话
 		Handler: func(args []string, ctx *Context) Result {
 			if len(args) == 0 {
-				return Result{Type: ResultDisplay, Content: "用法: /theme dark 或 /theme light"}
+				return Result{Type: ResultNotice, Content: "用法: /theme dark 或 /theme light"}
 			}
 			mode := strings.ToLower(args[0])
 			if mode != "dark" && mode != "light" {
-				return Result{Type: ResultDisplay, Content: "可用主题: dark, light"}
+				return Result{Type: ResultNotice, Content: "可用主题: dark, light"}
 			}
 			if ctx.OnThemeSwitch != nil {
 				msg := ctx.OnThemeSwitch(mode)
-				return Result{Type: ResultDisplay, Content: msg}
+				return Result{Type: ResultNotice, Content: msg}
 			}
-			return Result{Type: ResultDisplay, Content: "主题切换功能未就绪"}
+			return Result{Type: ResultNotice, Content: "主题切换功能未就绪"}
 		},
 	}
 }
 
 func cmdBug() *Command {
 	return &Command{
-		Name:        "/bug",
-		Description: "报告问题",
+		Name:         "/bug",
+		Description:  "报告问题",
+		ReadOnlySafe: true,
 		Handler: func(args []string, ctx *Context) Result {
 			var sb strings.Builder
 			sb.WriteString("🐛 报告问题\n\n")
@@ -902,7 +963,7 @@ func cmdBug() *Command {
 			sb.WriteString(fmt.Sprintf("  模型:     %s\n", ctx.Model))
 			sb.WriteString(fmt.Sprintf("  Provider: %s\n", ctx.Provider))
 			sb.WriteString(fmt.Sprintf("  权限模式: %s\n", ctx.PermMode))
-			return Result{Type: ResultDisplay, Content: sb.String()}
+			return Result{Type: ResultPanel, Content: sb.String()}
 		},
 	}
 }

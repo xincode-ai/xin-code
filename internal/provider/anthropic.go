@@ -58,6 +58,8 @@ func NewAnthropicProvider(apiKey, model, baseURL, authSource string) (*Anthropic
 
 func (p *AnthropicProvider) Name() string { return "anthropic" }
 
+func (p *AnthropicProvider) SetModel(model string) { p.model = model }
+
 func (p *AnthropicProvider) Capabilities() Capabilities {
 	return Capabilities{
 		Thinking:   strings.Contains(p.model, "opus") || strings.Contains(p.model, "sonnet"),
@@ -74,9 +76,15 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan Ev
 	// 转换消息格式
 	messages := convertToAnthropicMessages(req.Messages)
 
+	// 模型优先级：req.Model > p.model（消除双真源）
+	model := p.model
+	if req.Model != "" {
+		model = req.Model
+	}
+
 	// 构建 API 参数
 	params := anthropic.MessageNewParams{
-		Model:     p.model,
+		Model:     model,
 		MaxTokens: int64(req.MaxTokens),
 		Messages:  messages,
 	}

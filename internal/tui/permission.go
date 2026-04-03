@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -83,7 +84,7 @@ func (p PermissionDialog) View() string {
 	return lipgloss.Place(p.width, p.height, lipgloss.Center, lipgloss.Bottom, box)
 }
 
-// Card 渲染权限确认卡片（紧凑模式：工具名+摘要在一行，快捷键在第二行）
+// Card 渲染权限确认卡片（圆角边框 + 按键高亮反馈）
 func (p PermissionDialog) Card(width int) string {
 	if width < 40 {
 		width = 40
@@ -92,22 +93,44 @@ func (p PermissionDialog) Card(width int) string {
 	// 工具名（品牌色加粗）+ 摘要（dim 色）
 	summary := toolInputSummary(p.toolName, p.input)
 	nameStyle := lipgloss.NewStyle().Foreground(ColorPerm).Bold(true)
-	maxSummaryWidth := width - lipgloss.Width(p.toolName) - 6
+	maxSummaryWidth := width - lipgloss.Width(p.toolName) - 8
 	if maxSummaryWidth < 20 {
 		maxSummaryWidth = 20
 	}
 	summaryText := truncateText(summary, maxSummaryWidth)
 	header := nameStyle.Render(p.toolName) + "  " + StyleDim.Render(summaryText)
 
-	// 快捷键提示
-	keys := StyleDim.Render("y 允许 · n 拒绝 · a 总是允许 · e 总是拒绝")
+	keys := p.renderKeys()
 
 	return lipgloss.NewStyle().
-		BorderLeft(true).
+		BorderStyle(lipgloss.RoundedBorder()).
 		BorderForeground(ColorPerm).
-		PaddingLeft(1).
+		Padding(0, 1).
 		Width(width).
 		Render(header + "\n" + keys)
+}
+
+// renderKeys 渲染快捷键提示（当前按下的键高亮）
+func (p PermissionDialog) renderKeys() string {
+	type keyDef struct {
+		key   string
+		label string
+	}
+	defs := []keyDef{
+		{"y", "Y 允许"},
+		{"n", "N 拒绝"},
+		{"a", "A 总是"},
+		{"e", "E 从不"},
+	}
+	var parts []string
+	for _, d := range defs {
+		style := StyleDim
+		if p.feedbackKey == d.key {
+			style = lipgloss.NewStyle().Foreground(ColorPerm).Bold(true)
+		}
+		parts = append(parts, style.Render(d.label))
+	}
+	return strings.Join(parts, "  ")
 }
 
 // toolInputSummary 根据工具名提取紧凑摘要

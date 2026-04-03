@@ -8,7 +8,7 @@ import (
 )
 
 func TestNewSession(t *testing.T) {
-	sess := NewSession("claude-sonnet-4-6", "/tmp/test")
+	sess := NewSession(SessionConfig{Model: "claude-sonnet-4-6", WorkDir: "/tmp/test", Provider: "anthropic"})
 
 	if sess.ID == "" {
 		t.Error("会话 ID 不应为空")
@@ -25,7 +25,7 @@ func TestNewSession(t *testing.T) {
 }
 
 func TestAddMessage(t *testing.T) {
-	sess := NewSession("test-model", "/tmp")
+	sess := NewSession(SessionConfig{Model: "test-model", WorkDir: "/tmp"})
 
 	// 用户消息增加轮次
 	sess.AddMessage(provider.NewTextMessage(provider.RoleUser, "hello"))
@@ -47,7 +47,7 @@ func TestAddMessage(t *testing.T) {
 }
 
 func TestExportMarkdown(t *testing.T) {
-	sess := NewSession("test-model", "/tmp")
+	sess := NewSession(SessionConfig{Model: "test-model", WorkDir: "/tmp"})
 	sess.AddMessage(provider.NewTextMessage(provider.RoleUser, "写个 hello world"))
 	sess.AddMessage(provider.NewTextMessage(provider.RoleAssistant, "好的，给你一个 Go 的 hello world"))
 
@@ -64,8 +64,28 @@ func TestExportMarkdown(t *testing.T) {
 	}
 }
 
+func TestNewSessionWithRuntimeMetadata(t *testing.T) {
+	sess := NewSession(SessionConfig{
+		Model:      "claude-opus-4-6",
+		WorkDir:    "/tmp/project",
+		Provider:   "anthropic",
+		BaseURL:    "https://custom.endpoint.com",
+		AuthSource: "cc-oauth",
+	})
+
+	if sess.Provider != "anthropic" {
+		t.Errorf("Provider 不匹配: got %s", sess.Provider)
+	}
+	if sess.BaseURL != "https://custom.endpoint.com" {
+		t.Errorf("BaseURL 不匹配: got %s", sess.BaseURL)
+	}
+	if sess.AuthSource != "cc-oauth" {
+		t.Errorf("AuthSource 不匹配: got %s", sess.AuthSource)
+	}
+}
+
 func TestUpdateCost(t *testing.T) {
-	sess := NewSession("test-model", "/tmp")
+	sess := NewSession(SessionConfig{Model: "test-model", WorkDir: "/tmp"})
 	sess.UpdateCost(100, 50, 0.001)
 	sess.UpdateCost(200, 100, 0.002)
 
