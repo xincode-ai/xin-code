@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,6 +16,9 @@ import (
 
 // 折叠阈值：超过此行数的工具输出自动折叠
 const foldThreshold = 8
+
+// streamPreviewThrottle 流式 Markdown 预览最小渲染间隔
+const streamPreviewThrottle = 80 * time.Millisecond
 
 // msgResponsePrefix CC 风格缩进前缀
 const msgResponsePrefix = " " + SymResponse + " "
@@ -66,6 +71,17 @@ type ChatView struct {
 	// Markdown 渲染缓存（原文 → 渲染结果，避免重复 parse）
 	mdCache    map[string]string
 	mdCacheMax int
+
+	// 增量渲染：缓存已提交消息的渲染结果，streaming/blink 时只更新尾部
+	committedRendered string // 所有已提交消息的渲染文本
+	committedMsgCount int    // 缓存对应的消息数量
+	committedBlinkSt  bool   // 缓存对应的 blink 状态
+	cacheValid        bool   // 缓存是否有效
+
+	// 流式 Markdown 预览：节流渲染当前 assistant 消息
+	streamRenderedPreview string    // 当前流式消息的 Markdown 预览（为空则回退纯文本）
+	lastPreviewRender     time.Time // 上次预览渲染的时间
+	streamDirty           bool      // streamBuf 自上次预览渲染后有变更
 }
 
 // newGlamourRenderer 创建白色文字的 Glamour 渲染器
@@ -114,14 +130,23 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.viewport.Width = msg.Width
 		c.viewport.Height = msg.Height
 		c.renderer = newGlamourRenderer(msg.Width)
-		// 渲染器因宽度变化而重建，清空缓存
 		c.mdCache = make(map[string]string)
+		c.invalidateCache()
 		c.refreshContent(c.shouldAutoScroll())
 
 	case MsgSpinnerTick:
-		// 在有执行中工具或 thinking 时刷新（驱动闪烁动画）
-		c.toolBlink = !c.toolBlink
+		needRefresh := false
+		// 只在有执行中工具或 thinking 时翻转闪烁
 		if c.hasInProgressTools() || c.hasThinking() {
+			c.toolBlink = !c.toolBlink
+			needRefresh = true
+		}
+		// 流式 Markdown 预览定时刷新（补充 delta 未触发的更新）
+		if c.streaming && c.streamDirty {
+			c.renderStreamingPreview()
+			needRefresh = true
+		}
+		if needRefresh {
 			c.refreshContent(c.shouldAutoScroll())
 		}
 
@@ -129,7 +154,9 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		stick := c.shouldAutoScroll()
 		c.streaming = true
 		c.streamBuf += msg.Text
-		c.refreshContent(stick)
+		c.streamDirty = true
+		c.maybeRefreshStreamingPreview()
+		c.refreshStreaming(stick) // 增量：只追加 streamBuf，不重建 transcript
 
 	case MsgThinking:
 		stick := c.shouldAutoScroll()
@@ -142,6 +169,7 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 				Content: msg.Text,
 			})
 		}
+		c.invalidateCache()
 		c.refreshContent(stick)
 
 	case MsgToolStart:
@@ -155,6 +183,7 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			Content:   "", // 空内容表示执行中
 		})
 		c.markNewMessageIfScrolledUp(stick)
+		c.invalidateCache()
 		c.refreshContent(stick)
 
 	case MsgToolDone:
@@ -169,6 +198,7 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 				break
 			}
 		}
+		c.invalidateCache()
 		c.refreshContent(stick)
 
 	case MsgResponseDone:
@@ -181,8 +211,11 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			})
 			c.streamBuf = ""
 			c.streaming = false
+			c.streamRenderedPreview = ""
+			c.streamDirty = false
 			c.markNewMessageIfScrolledUp(stick)
-			c.refreshContent(stick)
+			c.invalidateCache()
+			c.refreshContent(stick) // 最终完整 Glamour 渲染走 committed cache
 		}
 
 	case MsgSubmit:
@@ -193,10 +226,12 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		})
 		c.streamBuf = ""
 		c.streaming = false
-		// 用户发消息，清除未读分隔线
+		c.streamRenderedPreview = ""
+		c.streamDirty = false
 		c.unreadDividerIdx = -1
 		c.hasNewMessages = false
 		c.userAtBottom = true
+		c.invalidateCache()
 		c.refreshContent(true)
 
 	case MsgSubAgentStart:
@@ -207,6 +242,7 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			ToolID:  msg.ID,
 			Content: msg.Description,
 		})
+		c.invalidateCache()
 		c.refreshContent(stick)
 
 	case MsgSubAgentDone:
@@ -217,6 +253,7 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			ToolID:  msg.ID,
 			Content: msg.Description + "\n" + msg.Result,
 		})
+		c.invalidateCache()
 		c.refreshContent(stick)
 
 	case MsgError:
@@ -226,7 +263,20 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 			Role:    "error",
 			Content: msg.Err.Error(),
 		})
+		c.invalidateCache()
 		c.refreshContent(stick)
+	}
+
+	// t 键 toggle thinking 折叠/展开（在 viewport 之前拦截）
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "t" {
+		for i := len(c.messages) - 1; i >= 0; i-- {
+			if c.messages[i].Role == "thinking" {
+				c.messages[i].Folded = !c.messages[i].Folded
+				c.invalidateCache()
+				c.refreshContent(false)
+				return c, cmd
+			}
+		}
 	}
 
 	c.viewport, cmd = c.viewport.Update(msg)
@@ -244,6 +294,7 @@ func (c *ChatView) AddSystemMessage(text string) {
 		Role:    "system",
 		Content: text,
 	})
+	c.invalidateCache()
 	c.refreshContent(true)
 }
 
@@ -252,10 +303,40 @@ func (c *ChatView) Clear() {
 	c.messages = nil
 	c.streamBuf = ""
 	c.streaming = false
+	c.streamRenderedPreview = ""
+	c.streamDirty = false
 	c.unreadDividerIdx = -1
 	c.hasNewMessages = false
 	c.userAtBottom = true
+	c.invalidateCache()
 	c.refreshContent(true)
+}
+
+// LoadMessages 从外部替换全部消息并刷新视图（用于 /resume 恢复 transcript）
+func (c *ChatView) LoadMessages(msgs []ChatMessage) {
+	for i := range msgs {
+		if msgs[i].ID == "" {
+			msgs[i].ID = nextMsgID()
+		}
+	}
+	c.messages = msgs
+	c.streamBuf = ""
+	c.streaming = false
+	c.streamRenderedPreview = ""
+	c.streamDirty = false
+	c.unreadDividerIdx = -1
+	c.hasNewMessages = false
+	c.userAtBottom = true
+	c.invalidateCache()
+	c.refreshContent(false)
+	c.viewport.GotoBottom()
+}
+
+// InvalidateCache 清空 Markdown 渲染缓存并重建（主题切换后调用）
+func (c *ChatView) InvalidateCache() {
+	c.mdCache = make(map[string]string)
+	c.invalidateCache()
+	c.refreshContent(c.shouldAutoScroll())
 }
 
 // HasMessages 返回是否有用户发起的消息（非 system 消息）
@@ -268,22 +349,23 @@ func (c ChatView) HasMessages() bool {
 	return c.streaming
 }
 
-// refreshContent 重新渲染所有消息到可滚动视口
-func (c *ChatView) refreshContent(stickToBottom bool) {
-	var sb strings.Builder
+// invalidateCache 标记已提交消息缓存失效（消息增删改时调用）
+func (c *ChatView) invalidateCache() {
+	c.cacheValid = false
+}
 
+// rebuildCommittedCache 重建已提交消息的渲染缓存
+func (c *ChatView) rebuildCommittedCache() {
+	var sb strings.Builder
 	for i, msg := range c.messages {
-		// 未读分隔线
 		if i == c.unreadDividerIdx && i > 0 {
 			sb.WriteString("\n\n")
 			dividerWidth := c.width - 4
 			if dividerWidth < 10 {
 				dividerWidth = 10
 			}
-			divider := StyleDim.Render(strings.Repeat("─", dividerWidth) + " 新消息")
-			sb.WriteString(divider)
+			sb.WriteString(StyleDim.Render(strings.Repeat("─", dividerWidth) + " 新消息"))
 		}
-
 		if i > 0 {
 			sb.WriteString("\n\n")
 		}
@@ -292,15 +374,54 @@ func (c *ChatView) refreshContent(stickToBottom bool) {
 			sb.WriteString(rendered)
 		}
 	}
+	c.committedRendered = sb.String()
+	c.committedMsgCount = len(c.messages)
+	c.committedBlinkSt = c.toolBlink
+	c.cacheValid = true
+}
 
-	if c.streaming && c.streamBuf != "" {
-		if len(c.messages) > 0 {
-			sb.WriteString("\n\n")
-		}
-		sb.WriteString(c.renderStreamingMessage())
+// refreshContent 重新渲染消息到视口（利用缓存避免全量重建）
+func (c *ChatView) refreshContent(stickToBottom bool) {
+	// 判断缓存是否可用
+	needRebuild := !c.cacheValid ||
+		c.committedMsgCount != len(c.messages) ||
+		(c.committedBlinkSt != c.toolBlink && (c.hasInProgressTools() || c.hasThinking()))
+
+	if needRebuild {
+		c.rebuildCommittedCache()
 	}
 
-	c.viewport.SetContent(sb.String())
+	// 拼接：已提交缓存 + 流式尾部
+	content := c.committedRendered
+	if c.streaming && c.streamBuf != "" {
+		if len(c.messages) > 0 {
+			content += "\n\n"
+		}
+		content += c.renderStreamingMessage()
+	}
+
+	c.viewport.SetContent(content)
+	if stickToBottom {
+		c.viewport.GotoBottom()
+	}
+}
+
+// refreshStreaming 只更新流式尾部，不重建已提交消息（MsgTextDelta 专用）
+func (c *ChatView) refreshStreaming(stickToBottom bool) {
+	// 确保 committed 缓存存在
+	if !c.cacheValid {
+		c.rebuildCommittedCache()
+	}
+
+	content := c.committedRendered
+	if c.streamBuf != "" {
+		if len(c.messages) > 0 {
+			content += "\n\n"
+		}
+		content += c.renderStreamingMessage()
+	}
+
+	c.viewport.SetContent(content)
 	if stickToBottom {
 		c.viewport.GotoBottom()
 	}
@@ -392,7 +513,33 @@ func (c *ChatView) renderMessage(msg ChatMessage) string {
 		if c.toolBlink {
 			symStyle = lipgloss.NewStyle().Foreground(ColorBrand).Italic(true)
 		}
-		return symStyle.Render(SymThinking) + StyleThinking.Render(" Thinking")
+
+		runeCount := utf8.RuneCountInString(msg.Content)
+		countStr := ""
+		if runeCount > 0 {
+			countStr = StyleDim.Render(fmt.Sprintf(" (%d 字)", runeCount))
+		}
+
+		if msg.Folded || msg.Content == "" {
+			// 折叠态：∴ Thinking (N 字)  首行摘要…
+			header := symStyle.Render(SymThinking) + StyleThinking.Render(" Thinking") + countStr
+			if msg.Content != "" {
+				// 取首行前 40 个 rune 作为摘要
+				summary := strings.ReplaceAll(msg.Content, "\n", " ")
+				runes := []rune(summary)
+				if len(runes) > 40 {
+					summary = string(runes[:40]) + "…"
+				}
+				header += "  " + StyleDim.Render(summary)
+			}
+			return header
+		}
+
+		// 展开态：header + 完整内容
+		header := symStyle.Render(SymThinking) + StyleThinking.Render(" Thinking") + countStr
+		bodyStyle := lipgloss.NewStyle().Foreground(ColorTextDim).Italic(true)
+		body := bodyStyle.Render(msg.Content)
+		return header + "\n" + wrapMessageResponse(body)
 
 	case "tool":
 		return c.renderToolMessage(msg)
@@ -431,16 +578,99 @@ func (c *ChatView) renderMessage(msg ChatMessage) string {
 	}
 }
 
-// renderStreamingMessage 流式输出：对整个 streamBuf 调 Glamour 渲染后包裹
+// renderStreamingMessage 流式输出：优先使用 Markdown 预览，无预览时回退纯文本
 func (c *ChatView) renderStreamingMessage() string {
-	body := c.streamBuf
-	if c.renderer != nil {
-		rendered, err := c.renderer.Render(body)
-		if err == nil {
-			body = strings.TrimSpace(rendered)
+	if c.streamRenderedPreview != "" {
+		return wrapMessageResponse(c.streamRenderedPreview)
+	}
+	return wrapMessageResponse(c.streamBuf)
+}
+
+// maybeRefreshStreamingPreview 节流 + 边界触发的流式 Markdown 预览
+func (c *ChatView) maybeRefreshStreamingPreview() {
+	if !c.streamDirty || c.streamBuf == "" {
+		return
+	}
+	elapsed := time.Since(c.lastPreviewRender)
+	if elapsed >= streamPreviewThrottle || c.hitMarkdownBoundary() {
+		c.renderStreamingPreview()
+	}
+}
+
+// hitMarkdownBoundary 检查 streamBuf 尾部是否命中 Markdown 结构边界
+func (c *ChatView) hitMarkdownBoundary() bool {
+	buf := c.streamBuf
+	n := len(buf)
+	if n < 2 {
+		return false
+	}
+
+	// 段落边界：\n\n
+	if n >= 2 && buf[n-2] == '\n' && buf[n-1] == '\n' {
+		return true
+	}
+
+	// 检查最后一行的开头特征
+	lastNL := strings.LastIndex(buf[:n-1], "\n")
+	var lastLine string
+	if lastNL >= 0 {
+		lastLine = buf[lastNL+1:]
+	} else {
+		lastLine = buf
+	}
+	trimmed := strings.TrimSpace(lastLine)
+
+	// 代码块 fence 开/关
+	if strings.HasPrefix(trimmed, "```") {
+		return true
+	}
+	// 标题行
+	if len(trimmed) > 1 && trimmed[0] == '#' && (trimmed[1] == ' ' || trimmed[1] == '#') {
+		return true
+	}
+	// 无序列表项
+	if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+		return true
+	}
+	// 有序列表项
+	if len(trimmed) >= 3 && trimmed[0] >= '0' && trimmed[0] <= '9' {
+		for i := 1; i < len(trimmed) && i < 4; i++ {
+			if trimmed[i] == '.' && i+1 < len(trimmed) && trimmed[i+1] == ' ' {
+				return true
+			}
+			if trimmed[i] < '0' || trimmed[i] > '9' {
+				break
+			}
 		}
 	}
-	return wrapMessageResponse(body)
+	// 引用块
+	if strings.HasPrefix(trimmed, "> ") {
+		return true
+	}
+	// 表格行
+	if strings.HasPrefix(trimmed, "|") {
+		return true
+	}
+
+	return false
+}
+
+// renderStreamingPreview 对当前 streamBuf 执行 Glamour Markdown 渲染
+// 渲染失败时回退为空（renderStreamingMessage 会降级为纯文本）
+func (c *ChatView) renderStreamingPreview() {
+	if c.renderer == nil || c.streamBuf == "" {
+		return
+	}
+	rendered, err := c.renderer.Render(c.streamBuf)
+	if err == nil {
+		c.streamRenderedPreview = strings.TrimSpace(rendered)
+	} else {
+		// 渲染失败：清空预览，降级为纯文本（避免显示旧的 stale 预览）
+		c.streamRenderedPreview = ""
+	}
+	// 无论成败都更新时间戳和 dirty 标记，避免频繁重试
+	c.streamDirty = false
+	c.lastPreviewRender = time.Now()
 }
 
 // renderToolMessage 渲染工具调用行

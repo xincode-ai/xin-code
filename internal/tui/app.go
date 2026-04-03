@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -21,6 +22,7 @@ const (
 	StateDiffPreview                  // 等待差异确认
 	StateAskUser                      // 询问工具等待用户输入
 	StateResumeSelect                 // 会话恢复选择器
+	StatePanel                        // 可滚动文本面板
 )
 
 // EventSender 模型代理向界面发送事件的回调接口
@@ -36,6 +38,7 @@ type App struct {
 	input          InputBox
 	permission     PermissionDialog
 	diff           DiffDialog
+	panel          Panel
 	ccSpinner      SpinnerState
 	resumeSelector ResumeSelector
 
@@ -54,6 +57,10 @@ type App struct {
 	askResponseCh   chan string  // 询问工具回传通道
 	waitingForEvent bool        // 防止重复注册 waitForEvent
 
+	// 鼠标模式
+	mouseMode     MouseMode // 当前鼠标模式（默认 Browse）
+	mouseModePrev MouseMode // modal 打开前的模式（关闭后恢复）
+
 	// 配置
 	model    string
 	provider string
@@ -70,7 +77,8 @@ type App struct {
 	OnModelSwitch func(string)
 	OnExport      func() string
 	OnInterrupt   func()
-	OnResume      func() string
+	OnResume      func() ([]ResumeEntry, error)
+	OnResumeLoad  func(sessionID string) error
 	OnThemeSwitch func(string) string
 	OnLogin       func() string
 	OnLogout      func() string
@@ -85,6 +93,13 @@ type App struct {
 	// 临时通知（slash 命令显示类结果，不写入 transcript）
 	ephemeralNotice    string
 	ephemeralNoticeAge int // tick 计数器，到达阈值后清除
+
+	// AskUser 问题文本（bottomFloat 显示，不写入 transcript）
+	askQuestion string
+
+	// 只读浏览模式（/resume 恢复不兼容会话时启用）
+	readOnly       bool
+	readOnlyReason string
 }
 
 // AppConfig TUI 初始化配置
@@ -112,10 +127,12 @@ func NewApp(cfg AppConfig) *App {
 		input:          NewInputBox(commandHintsFromSlash(slashH.AllCommands())),
 		permission:     NewPermissionDialog(),
 		diff:           NewDiffDialog(),
+		panel:          NewPanel(),
 		ccSpinner:      NewSpinnerState(),
 		resumeSelector: NewResumeSelector(),
 		slashHandler:   slashH,
 		state:        StateInput,
+		mouseMode:    MouseModeBrowse,
 		eventCh:      make(chan tea.Msg, 512),
 		submitCh:     make(chan string, 8),
 		model:        cfg.Model,
@@ -193,7 +210,22 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.MouseMsg:
-		// 鼠标滚轮事件转发给 chat viewport 处理滚动
+		// 记录鼠标事件时间戳（用于 input 抑制转义碎片）
+		a.input.RecordMouseEvent()
+		// 鼠标事件按可见层级分发：最上层优先
+		if a.panel.IsVisible() {
+			a.panel, _ = a.panel.Update(msg)
+			return a, nil
+		}
+		if a.diff.IsVisible() {
+			a.diff, _ = a.diff.Update(msg)
+			return a, nil
+		}
+		if a.resumeSelector.IsVisible() {
+			a.resumeSelector, _ = a.resumeSelector.Update(msg)
+			return a, nil
+		}
+		// 无 modal/overlay 时，转发给 chat viewport
 		a.chat, _ = a.chat.Update(msg)
 		return a, nil
 
@@ -201,6 +233,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 任意按键清除临时通知
 		if a.ephemeralNotice != "" {
 			a.clearEphemeralNotice()
+		}
+
+		// Panel 拦截键盘事件（最高 modal 层级）
+		if a.panel.IsVisible() {
+			a.panel, _ = a.panel.Update(msg)
+			if !a.panel.IsVisible() {
+				a.state = StateInput
+				cmds = append(cmds, a.input.Focus(), a.leaveModalMouseMode())
+			}
+			return a, tea.Batch(cmds...)
 		}
 
 		if a.permission.IsVisible() {
@@ -216,17 +258,49 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.diff, _ = a.diff.Update(msg)
 			if !a.diff.IsVisible() {
 				a.state = StateToolExec
-				cmds = append(cmds, a.safeWaitForEvent())
+				cmds = append(cmds, a.safeWaitForEvent(), a.leaveModalMouseMode())
 			}
 			return a, tea.Batch(cmds...)
 		}
 
 		// 会话恢复选择器拦截键盘事件
 		if a.resumeSelector.IsVisible() {
+			wasVisible := a.resumeSelector.IsVisible()
+			selectedBefore := a.resumeSelector.SelectedEntry()
 			a.resumeSelector, _ = a.resumeSelector.Update(msg)
-			if !a.resumeSelector.IsVisible() {
+			if wasVisible && !a.resumeSelector.IsVisible() {
+				// 选择器关闭
+				if selectedBefore != nil && msg.Type == tea.KeyEnter {
+					switch selectedBefore.Mode {
+					case ResumeBlocked:
+						// 不兼容：拒绝恢复，显示原因
+						a.showEphemeralNotice(selectedBefore.ModeReason)
+					case ResumeReadonly:
+						// 只读浏览：加载 transcript 但禁止发送
+						if a.OnResumeLoad != nil {
+							if err := a.OnResumeLoad(selectedBefore.ID); err != nil {
+								a.showEphemeralNotice("恢复会话失败: " + err.Error())
+							} else {
+								a.readOnly = true
+								a.readOnlyReason = ReasonReadonlyNotice
+								a.showEphemeralNotice(ReasonReadonlyNotice)
+							}
+						}
+					default: // ResumeContinue
+						// 完全恢复：可继续对话
+						if a.OnResumeLoad != nil {
+							if err := a.OnResumeLoad(selectedBefore.ID); err != nil {
+								a.showEphemeralNotice("恢复会话失败: " + err.Error())
+							} else {
+								a.readOnly = false
+								a.readOnlyReason = ""
+								a.showEphemeralNotice("已恢复会话: " + selectedBefore.ID)
+							}
+						}
+					}
+				}
 				a.state = StateInput
-				cmds = append(cmds, a.input.Focus())
+				cmds = append(cmds, a.input.Focus(), a.leaveModalMouseMode())
 			}
 			return a, tea.Batch(cmds...)
 		}
@@ -247,6 +321,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlL:
 			a.chat.Clear()
 			return a, nil
+		case tea.KeyCtrlY:
+			// 切换鼠标模式：浏览 ↔ 复制
+			return a, a.toggleMouseMode()
+		case tea.KeyEsc:
+			// 复制模式下 Esc 返回浏览模式
+			if a.mouseMode == MouseModeSelect {
+				a.mouseMode = MouseModeBrowse
+				return a, tea.EnableMouseCellMotion
+			}
 		}
 
 		if a.shouldRouteKeyToChat(msg) {
@@ -260,6 +343,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if answer != "" {
 					responseCh := a.askResponseCh
 					a.askResponseCh = nil
+					a.askQuestion = ""
 					a.input.Reset()
 					a.state = StateToolExec
 					cmd := func() tea.Msg {
@@ -281,9 +365,21 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case MsgSubmit:
 		text := msg.Text
 		if strings.HasPrefix(text, "/") {
+			// 只读模式下，先检查 slash 命令安全等级，拦截危险命令
+			if a.readOnly && !a.slashHandler.IsReadOnlySafe(text) {
+				cmdName := strings.Fields(text)[0]
+				a.showEphemeralNotice("当前会话为只读浏览，不能执行 " + cmdName)
+				return a, nil
+			}
 			model, cmd := a.handleSlashCommand(text)
 			a.resizeLayout()
 			return model, cmd
+		}
+
+		// 只读模式拦截普通消息发送
+		if a.readOnly {
+			a.showEphemeralNotice(a.readOnlyReason)
+			return a, nil
 		}
 
 		a.chat, _ = a.chat.Update(msg)
@@ -354,18 +450,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.state = StatePermission
 		a.permission.Show(msg.ToolName, msg.Input, msg.Response)
 		a.input.Blur()
+		// 权限卡片是 BottomFloat 层（非全屏 modal），纯键盘交互，不需要切换鼠标模式
 		return a, nil
 
 	case MsgDiffPreview:
 		a.state = StateDiffPreview
 		a.diff.Show(msg.Path, msg.DiffText, msg.Response)
 		a.input.Blur()
-		return a, nil
+		return a, a.enterModalMouseMode()
 
 	case MsgAskUser:
 		a.state = StateAskUser
 		a.askResponseCh = msg.Response
-		a.chat.AddSystemMessage("需要你补充输入：\n" + msg.Question)
+		a.askQuestion = msg.Question
+		a.resizeLayout()
 		cmds = append(cmds, a.input.Focus())
 		return a, tea.Batch(cmds...)
 
@@ -382,7 +480,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case MsgSystemNotice:
-		a.chat.AddSystemMessage(msg.Text)
+		a.showEphemeralNotice(msg.Text)
 		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
 
@@ -427,28 +525,24 @@ func (a *App) View() string {
 		return ""
 	}
 
-	contentWidth := a.width - 2
-	if contentWidth < 40 {
-		contentWidth = a.width
-	}
+	contentWidth := a.contentWidth()
 
 	var content LayerContent
 
-	// Modal 层：diff 预览独占
-	if a.diff.IsVisible() {
-		content.Modal = a.diff.View()
-		return a.layout.Render(content)
-	}
-
-	// Overlay 层：选择器等覆盖组件
-	if a.resumeSelector.IsVisible() {
-		content.Overlay = a.resumeSelector.View()
-	}
-
-	// BottomFloat 层：临时通知 / spinner / 权限确认
+	// BottomFloat 层：临时通知 / spinner / 权限确认 / AskUser 问题
 	var floatParts []string
+	if a.askQuestion != "" && a.state == StateAskUser {
+		// AskUser 问题卡片（不写入 transcript）
+		askWidth := min(80, max(40, contentWidth-4))
+		askCard := lipgloss.NewStyle().
+			BorderLeft(true).
+			BorderForeground(ColorPerm).
+			PaddingLeft(1).
+			Width(askWidth).
+			Render(lipgloss.NewStyle().Foreground(ColorPerm).Bold(true).Render("需要输入") + "\n" + StyleDim.Render(a.askQuestion))
+		floatParts = append(floatParts, askCard)
+	}
 	if a.ephemeralNotice != "" {
-		// 临时通知渲染（带左侧边框，与 slash hints 风格统一）
 		noticeWidth := min(80, max(40, contentWidth-4))
 		notice := lipgloss.NewStyle().
 			BorderLeft(true).
@@ -469,31 +563,34 @@ func (a *App) View() string {
 		content.BottomFloat = strings.Join(floatParts, "\n")
 	}
 
-	// Bottom 层：输入框 + 状态栏
-	inputView := a.renderInput(contentWidth)
-	statusView := a.renderStatusLine()
-	content.Bottom = inputView + "\n" + statusView
+	// Bottom 层：Composer（双分隔线 + 输入 + 状态栏）
+	content.Bottom = renderComposer(a.input.View(), ComposerConfig{
+		Model:      a.model,
+		PermMode:   a.permMode,
+		MouseMode:  a.mouseMode,
+		ReadOnly:   a.readOnly,
+		Tracker:    a.tracker,
+		MaxContext: a.maxContext,
+	}, contentWidth)
 
-	// 主滚动区：transcript（占满剩余高度）
-	chatHeight := a.layout.MainHeight(content.Bottom, content.BottomFloat, content.Overlay)
-	a.chat, _ = a.chat.Update(tea.WindowSizeMsg{Width: contentWidth, Height: chatHeight})
-	content.Main = a.chat.View()
+	// 主滚动区：transcript（含"有新消息"提示，尺寸同步由 resizeLayout 负责）
+	content.Main = a.chat.ViewWithHint()
+
+	// Overlay 层：选择器等覆盖组件（居中浮层，只覆盖 box 区域，不抹背景）
+	if a.resumeSelector.IsVisible() {
+		content.Overlay = a.resumeSelector.View()
+	}
+
+	// Modal 层：diff / panel（覆盖全屏，非空行替换 base，保留背景感）
+	if a.diff.IsVisible() {
+		content.Modal = a.diff.View()
+	} else if a.panel.IsVisible() {
+		content.Modal = a.panel.View()
+	}
 
 	return lipgloss.NewStyle().Padding(0, 1).Render(a.layout.Render(content))
 }
 
-// renderInput 渲染输入区（仅上边框，CC 风格）
-func (a *App) renderInput(contentWidth int) string {
-	inputBorder := lipgloss.NewStyle().
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderTop(true).
-		BorderBottom(false).
-		BorderLeft(false).
-		BorderRight(false).
-		BorderForeground(ColorInputBorder).
-		Width(contentWidth)
-	return inputBorder.Render(a.input.View())
-}
 
 func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 	ctx := &slash.Context{
@@ -517,7 +614,30 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		OnCompact:           a.OnCompact,
 		OnModelSwitch:       a.OnModelSwitch,
 		OnExport:            a.OnExport,
-		OnResume:            a.OnResume,
+		OnResume: func() ([]slash.ResumeEntryData, error) {
+			if a.OnResume == nil {
+				return nil, nil
+			}
+			entries, err := a.OnResume()
+			if err != nil {
+				return nil, err
+			}
+			result := make([]slash.ResumeEntryData, len(entries))
+			for i, e := range entries {
+				result[i] = slash.ResumeEntryData{
+					ID:         e.ID,
+					Model:      e.Model,
+					Provider:   e.Provider,
+					BaseURL:    e.BaseURL,
+					AuthSource: e.AuthSource,
+					Turns:      e.Turns,
+					Cost:       e.Cost,
+					Mode:       string(e.Mode),
+					ModeReason: e.ModeReason,
+				}
+			}
+			return result, nil
+		},
 		OnLogin:             a.OnLogin,
 		OnLogout:            a.OnLogout,
 		OnSkillsList:        a.OnSkillsList,
@@ -530,9 +650,7 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 			default:
 				SetTheme(ThemeDark)
 			}
-			// 清空 Markdown 缓存（颜色变了，需要重新渲染）
-			a.chat.mdCache = make(map[string]string)
-			a.chat.refreshContent(a.chat.shouldAutoScroll())
+			a.chat.InvalidateCache()
 			return fmt.Sprintf("已切换到 %s 主题", mode)
 		},
 	}
@@ -554,7 +672,7 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 
 	case slash.ResultPrompt:
-		a.chat.AddSystemMessage(fmt.Sprintf("执行命令 %s", cmd))
+		// 直接进入执行状态，不往 transcript 插入系统消息
 		a.state = StateQuery
 		submitCmd := func() tea.Msg {
 			a.submitCh <- result.Content
@@ -562,9 +680,21 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(submitCmd, a.safeWaitForEvent())
 
-	case slash.ResultDisplay:
-		// 纯信息展示类命令不写入 transcript，显示为临时通知
+	case slash.ResultNotice:
+		// 短提示：临时通知
 		a.showEphemeralNotice(result.Content)
+
+	case slash.ResultPanel:
+		// 长内容：打开可滚动面板
+		a.panel.Show(cmd, result.Content)
+		a.state = StatePanel
+		a.input.Blur()
+		return a, a.enterModalMouseMode()
+
+	case slash.ResultSelector:
+		// 选择器：解析数据并打开 ResumeSelector
+		a.openResumeSelector(result.Content)
+		return a, a.enterModalMouseMode()
 	}
 
 	return a, nil
@@ -578,15 +708,32 @@ func (a *App) resizeLayout() {
 	a.layout.width = a.width
 	a.layout.height = a.height
 
-	contentWidth := a.width - 2
-	if contentWidth < 40 {
-		contentWidth = a.width
-	}
-	// 输入框无左右边框，只需减去少量余量
+	contentWidth := a.contentWidth()
+
+	// 子组件尺寸同步
 	a.input, _ = a.input.Update(tea.WindowSizeMsg{Width: contentWidth - 2})
 	a.permission, _ = a.permission.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
 	a.diff, _ = a.diff.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
+	a.panel, _ = a.panel.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
 	a.resumeSelector, _ = a.resumeSelector.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
+
+	// 计算主区高度并同步 chat viewport（关键：从 View 移到此处）
+	a.syncChatSize()
+}
+
+// syncChatSize 计算主区高度并同步 chat viewport 尺寸
+func (a *App) syncChatSize() {
+	contentWidth := a.contentWidth()
+	bottomContent := renderComposer(a.input.View(), ComposerConfig{
+		Model:      a.model,
+		PermMode:   a.permMode,
+		MouseMode:  a.mouseMode,
+		ReadOnly:   a.readOnly,
+		Tracker:    a.tracker,
+		MaxContext: a.maxContext,
+	}, contentWidth)
+	chatHeight := a.layout.MainHeight(bottomContent)
+	a.chat, _ = a.chat.Update(tea.WindowSizeMsg{Width: contentWidth, Height: chatHeight})
 }
 
 
@@ -605,25 +752,91 @@ func (a *App) clearEphemeralNotice() {
 	a.ephemeralNoticeAge = 0
 }
 
+// openResumeSelector 解析 JSON 数据并打开选择器
+func (a *App) openResumeSelector(jsonData string) {
+	var slashEntries []slash.ResumeEntryData
+	if err := json.Unmarshal([]byte(jsonData), &slashEntries); err != nil {
+		a.showEphemeralNotice("解析会话数据失败")
+		return
+	}
+
+	entries := make([]ResumeEntry, len(slashEntries))
+	for i, e := range slashEntries {
+		entries[i] = ResumeEntry{
+			ID:         e.ID,
+			Model:      e.Model,
+			Provider:   e.Provider,
+			BaseURL:    e.BaseURL,
+			AuthSource: e.AuthSource,
+			Turns:      e.Turns,
+			Cost:       e.Cost,
+			Mode:       ResumeMode(e.Mode),
+			ModeReason: e.ModeReason,
+		}
+	}
+
+	a.resumeSelector.Show(entries)
+	a.state = StateResumeSelect
+	a.input.Blur()
+}
+
+// IsReadOnly 返回当前是否处于只读浏览模式
+func (a *App) IsReadOnly() bool {
+	return a.readOnly
+}
+
+// SetModel 切换运行时模型（/resume 恢复后调用）
+func (a *App) SetModel(model string) {
+	a.model = model
+}
+
+// SetProvider 切换运行时 provider 名称（/resume 恢复后调用）
+func (a *App) SetProvider(provider string) {
+	a.provider = provider
+}
+
+// RestoreTranscript 从结构化消息恢复前台 transcript（/resume 后调用）
+func (a *App) RestoreTranscript(msgs []ChatMessage) {
+	a.chat.LoadMessages(msgs)
+	a.resizeLayout()
+}
+
+// toggleMouseMode 切换浏览/复制模式
+func (a *App) toggleMouseMode() tea.Cmd {
+	if a.mouseMode == MouseModeBrowse {
+		a.mouseMode = MouseModeSelect
+		return tea.DisableMouse
+	}
+	a.mouseMode = MouseModeBrowse
+	return tea.EnableMouseCellMotion
+}
+
+// enterModalMouseMode modal/panel/selector 打开时调用：保存当前模式，强制浏览
+func (a *App) enterModalMouseMode() tea.Cmd {
+	a.mouseModePrev = a.mouseMode
+	a.mouseMode = MouseModeBrowse
+	return tea.EnableMouseCellMotion
+}
+
+// leaveModalMouseMode modal/panel/selector 关闭时调用：恢复之前的鼠标模式
+func (a *App) leaveModalMouseMode() tea.Cmd {
+	a.mouseMode = a.mouseModePrev
+	if a.mouseMode == MouseModeSelect {
+		return tea.DisableMouse
+	}
+	return nil // 已经在浏览模式
+}
+
 func (a *App) shouldRouteKeyToChat(msg tea.KeyMsg) bool {
 	switch msg.String() {
 	case "pgup", "pgdown", "home", "end":
 		return true
+	case "t":
+		// t 键只在非输入状态下路由到 chat（toggle thinking）
+		return a.state != StateInput && a.state != StateAskUser
 	default:
 		return false
 	}
-}
-
-func (a *App) contextPercent() int {
-	if a.maxContext <= 0 {
-		return 0
-	}
-	used := a.tracker.TotalTokens()
-	percent := float64(used) / float64(a.maxContext) * 100
-	if percent > 100 {
-		percent = 100
-	}
-	return int(percent + 0.5)
 }
 
 func (a *App) contentWidth() int {
@@ -632,26 +845,6 @@ func (a *App) contentWidth() int {
 		width = a.width
 	}
 	return width
-}
-
-func permissionLabel(mode string) string {
-	switch mode {
-	case "default":
-		return "默认确认"
-	case "acceptEdits":
-		return "自动接受编辑"
-	case "plan":
-		return "仅规划"
-	case "bypassPermissions":
-		return "完全放行"
-	case "interactive":
-		return "交互确认"
-	default:
-		if mode == "" {
-			return "未设置"
-		}
-		return mode
-	}
 }
 
 func shortModelName(model string) string {
