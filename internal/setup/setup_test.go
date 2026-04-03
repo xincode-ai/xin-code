@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xincode-ai/xin-code/internal/auth"
 )
 
@@ -60,5 +61,43 @@ func TestSaveGlobalConfig(t *testing.T) {
 	}
 	if !strings.Contains(content, "claude-sonnet") {
 		t.Errorf("settings should contain model, got: %s", content)
+	}
+}
+
+func TestSetupModelStepFlow(t *testing.T) {
+	m := New(t.TempDir())
+
+	// 初始状态应该是 StepProvider
+	if m.step != StepProvider {
+		t.Errorf("expected StepProvider, got %d", m.step)
+	}
+
+	// 模拟选择第一个 Provider (Anthropic)
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(Model)
+	if m.step != StepAPIKey {
+		t.Errorf("after provider select, expected StepAPIKey, got %d", m.step)
+	}
+	if m.result.Provider != "anthropic" {
+		t.Errorf("expected provider 'anthropic', got %q", m.result.Provider)
+	}
+}
+
+func TestSetupCustomProviderRequiresBaseURL(t *testing.T) {
+	m := New(t.TempDir())
+
+	// 选择 custom provider（第 4 个，index=3）
+	m.providerIdx = 3
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(Model)
+
+	// 输入 API Key
+	m.apiKeyInput.SetValue("test-key")
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(Model)
+
+	// custom provider 应该进入 StepBaseURL
+	if m.step != StepBaseURL {
+		t.Errorf("custom provider should go to StepBaseURL, got %d", m.step)
 	}
 }
