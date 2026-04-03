@@ -27,6 +27,9 @@ type EventSender func(tea.Msg)
 
 // App TUI 主 Model
 type App struct {
+	// 布局管理器
+	layout Layout
+
 	// 子组件
 	chat       ChatView
 	input      InputBox
@@ -394,60 +397,57 @@ func (a *App) View() string {
 	if a.width == 0 {
 		return ""
 	}
-	if a.diff.IsVisible() {
-		return a.diff.View()
-	}
 
 	contentWidth := a.width - 2
 	if contentWidth < 40 {
 		contentWidth = a.width
 	}
 
-	// 底部组件
-	var bottomParts []string
+	var content LayerContent
 
-	// Spinner 行（仅在活跃时显示）
-	if spinnerView := a.ccSpinner.View(); spinnerView != "" {
-		bottomParts = append(bottomParts, spinnerView)
+	// Modal 层：diff 预览独占
+	if a.diff.IsVisible() {
+		content.Modal = a.diff.View()
+		return a.layout.Render(content)
 	}
 
-	// 权限确认（嵌入底部）
+	// BottomFloat 层：spinner / 权限确认
+	var floatParts []string
+	if spinnerView := a.ccSpinner.View(); spinnerView != "" {
+		floatParts = append(floatParts, spinnerView)
+	}
 	if a.permission.IsVisible() {
 		cardWidth := min(88, max(48, contentWidth-4))
-		bottomParts = append(bottomParts, a.permission.Card(cardWidth))
+		floatParts = append(floatParts, a.permission.Card(cardWidth))
+	}
+	if len(floatParts) > 0 {
+		content.BottomFloat = strings.Join(floatParts, "\n")
 	}
 
-	// 输入框（CC 风格：仅上下横线，无左右竖线）
+	// Bottom 层：输入框 + 状态栏
+	inputView := a.renderInput(contentWidth)
+	statusView := a.renderStatusLine()
+	content.Bottom = inputView + "\n" + statusView
+
+	// 主滚动区：transcript（占满剩余高度）
+	chatHeight := a.layout.MainHeight(content.Bottom, content.BottomFloat)
+	a.chat, _ = a.chat.Update(tea.WindowSizeMsg{Width: contentWidth, Height: chatHeight})
+	content.Main = a.chat.View()
+
+	return lipgloss.NewStyle().Padding(0, 1).Render(a.layout.Render(content))
+}
+
+// renderInput 渲染输入区（仅上边框，CC 风格）
+func (a *App) renderInput(contentWidth int) string {
 	inputBorder := lipgloss.NewStyle().
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderTop(true).
-		BorderBottom(true).
+		BorderBottom(false).
 		BorderLeft(false).
 		BorderRight(false).
 		BorderForeground(ColorInputBorder).
-		Width(contentWidth).
-		MarginTop(1)
-	bottomParts = append(bottomParts, inputBorder.Render(a.input.View()))
-
-	// Footer 单行
-	bottomParts = append(bottomParts, a.renderFooter())
-
-	bottom := strings.Join(bottomParts, "\n")
-	bottomHeight := lipgloss.Height(bottom)
-
-	// 聊天区占满剩余高度
-	chatHeight := a.height - bottomHeight - 1
-	if chatHeight < 4 {
-		chatHeight = 4
-	}
-
-	// 更新 chat 尺寸并获取视图
-	a.chat, _ = a.chat.Update(tea.WindowSizeMsg{Width: contentWidth, Height: chatHeight})
-	chatView := a.chat.View()
-
-	return lipgloss.NewStyle().Padding(0, 1).Render(
-		lipgloss.JoinVertical(lipgloss.Left, chatView, bottom),
-	)
+		Width(contentWidth)
+	return inputBorder.Render(a.input.View())
 }
 
 func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
@@ -528,6 +528,10 @@ func (a *App) resizeLayout() {
 	if a.width == 0 || a.height == 0 {
 		return
 	}
+	// 同步布局管理器尺寸
+	a.layout.width = a.width
+	a.layout.height = a.height
+
 	contentWidth := a.width - 2
 	if contentWidth < 40 {
 		contentWidth = a.width
@@ -538,33 +542,6 @@ func (a *App) resizeLayout() {
 	a.diff, _ = a.diff.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
 }
 
-// renderFooter 渲染底部状态行（CC 风格极简单行）
-func (a *App) renderFooter() string {
-	parts := []string{shortModelName(a.model)}
-	parts = append(parts, a.tracker.CostString())
-
-	// 上下文使用量分级颜色（<60% 绿 / 60-80% 黄 / >80% 红）
-	ctxPercent := a.contextPercent()
-	ctxColor := ContextColor(float64(ctxPercent))
-	ctxStyle := lipgloss.NewStyle().Foreground(ctxColor)
-	parts = append(parts, ctxStyle.Render(fmt.Sprintf("%d%% context", ctxPercent)))
-
-	// 权限模式简写（CC StatusLine 也显示权限模式）
-	permLabels := map[string]string{
-		"bypass":      "bypass",
-		"acceptEdits": "auto-edit",
-		"default":     "默认确认",
-		"plan":        "plan-only",
-		"interactive": "全部确认",
-	}
-	if label, ok := permLabels[a.permMode]; ok {
-		parts = append(parts, label)
-	}
-
-	parts = append(parts, "/help")
-	parts = append(parts, "Option+drag to select")
-	return StyleFooter.Render(strings.Join(parts, " · "))
-}
 
 func (a *App) shouldRouteKeyToChat(msg tea.KeyMsg) bool {
 	switch msg.String() {
