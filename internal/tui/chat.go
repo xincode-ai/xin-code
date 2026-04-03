@@ -107,18 +107,22 @@ func newGlamourRenderer(width int) *glamour.TermRenderer {
 	return r
 }
 
+// contentPadLeft 内容区左侧 padding（对齐 Claude Code 的视觉间距）
+const contentPadLeft = 2
+
 // NewChatView 创建转录区域
 func NewChatView(width, height int) ChatView {
-	vp := viewport.New(width, height)
-	vp.Style = lipgloss.NewStyle()
+	innerWidth := width - contentPadLeft
+	vp := viewport.New(innerWidth, height)
+	vp.Style = lipgloss.NewStyle().PaddingLeft(contentPadLeft)
 	vp.MouseWheelEnabled = true
 	vp.MouseWheelDelta = 3
 
 	return ChatView{
 		viewport:         vp,
-		width:            width,
+		width:            innerWidth,
 		height:           height,
-		renderer:         newGlamourRenderer(width),
+		renderer:         newGlamourRenderer(innerWidth),
 		mdCache:          make(map[string]string),
 		mdCacheMax:       500,
 		unreadDividerIdx: -1,
@@ -143,9 +147,10 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		c.width = msg.Width
+		innerWidth := msg.Width - contentPadLeft
+		c.width = innerWidth
 		c.height = msg.Height
-		c.viewport.Width = msg.Width
+		c.viewport.Width = innerWidth
 		c.viewport.Height = msg.Height
 		c.renderer = newGlamourRenderer(msg.Width)
 		c.mdCache = make(map[string]string)

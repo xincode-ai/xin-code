@@ -35,6 +35,7 @@ func renderComposer(inputView string, cfg ComposerConfig, width int) string {
 	statusLine := renderComposerStatus(cfg, width)
 
 	return strings.Join([]string{
+		"", // 内容区与输入框之间的呼吸间距
 		separator,
 		inputView,
 		separator,
