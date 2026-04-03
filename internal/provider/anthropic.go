@@ -80,10 +80,20 @@ func (p *AnthropicProvider) Stream(ctx context.Context, req *Request) (<-chan Ev
 		MaxTokens: int64(req.MaxTokens),
 		Messages:  messages,
 	}
-	if req.System != "" {
-		params.System = []anthropic.TextBlockParam{
-			{Text: req.System},
+
+	// 构建 system prompt（支持 cache_control 分块）
+	sysBlocks := req.EffectiveSystemBlocks()
+	if len(sysBlocks) > 0 {
+		var systemParams []anthropic.TextBlockParam
+		for i, block := range sysBlocks {
+			tb := anthropic.TextBlockParam{Text: block.Text}
+			// 为最后一个 block 或显式标记 ephemeral 的 block 添加 cache_control
+			if i == len(sysBlocks)-1 || block.CacheControl == "ephemeral" {
+				tb.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
+			systemParams = append(systemParams, tb)
 		}
+		params.System = systemParams
 	}
 
 	// 转换工具定义

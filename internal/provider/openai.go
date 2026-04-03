@@ -53,8 +53,18 @@ func (p *OpenAIProvider) Capabilities() Capabilities {
 func (p *OpenAIProvider) Stream(ctx context.Context, req *Request) (<-chan Event, error) {
 	ch := make(chan Event, 64)
 
+	// 将 SystemBlocks 拼接为单个 system prompt（OpenAI 不支持 cache_control）
+	systemPrompt := req.System
+	if len(req.SystemBlocks) > 0 {
+		var parts []string
+		for _, block := range req.SystemBlocks {
+			parts = append(parts, block.Text)
+		}
+		systemPrompt = strings.Join(parts, "\n\n")
+	}
+
 	// 转换消息格式
-	messages := convertToOpenAIMessages(req.Messages, req.System)
+	messages := convertToOpenAIMessages(req.Messages, systemPrompt)
 
 	// 构建 API 参数
 	params := openai.ChatCompletionNewParams{

@@ -72,11 +72,29 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 		PermMode:   a.permMode,
 		MaxContext: a.provider.Capabilities().MaxContext,
 	}
-	systemPrompt := xcontext.BuildFullSystemPrompt(promptCfg, a.tools.ToolDefs())
+	// 分块构建 system prompt（支持 Anthropic prompt caching）
+	// Block 1: 指令部分（静态，可缓存）— 包含角色定义、工具列表等
+	instructionPrompt := xcontext.BuildFullSystemPrompt(promptCfg, a.tools.ToolDefs())
 
-	// Git 状态快照拼入 system prompt 末尾（CC: appendSystemContext）
-	if sysCtx := xcontext.BuildSystemContext(promptCfg); sysCtx != "" {
-		systemPrompt += "\n\n" + sysCtx
+	// Block 2: 上下文部分（动态）— Git 状态等每轮可能变化的信息
+	contextPrompt := xcontext.BuildSystemContext(promptCfg)
+
+	// 组装 SystemBlocks
+	var systemBlocks []provider.SystemBlock
+	systemBlocks = append(systemBlocks, provider.SystemBlock{
+		Text:         instructionPrompt,
+		CacheControl: "ephemeral", // 静态指令启用缓存
+	})
+	if contextPrompt != "" {
+		systemBlocks = append(systemBlocks, provider.SystemBlock{
+			Text: contextPrompt, // 动态上下文不标记缓存，但 anthropic.go 会为最后一个 block 自动添加
+		})
+	}
+
+	// 同时保留 System string 做兼容（供非 Anthropic provider 使用）
+	systemPrompt := instructionPrompt
+	if contextPrompt != "" {
+		systemPrompt += "\n\n" + contextPrompt
 	}
 
 	// 用户上下文（XINCODE.md + 日期）作为 system-reminder user message 注入消息列表首位
@@ -109,11 +127,12 @@ func (a *Agent) Run(ctx context.Context, userMessage string) {
 
 		// 构建请求
 		req := &provider.Request{
-			Model:     a.config.Model,
-			System:    systemPrompt,
-			Messages:  a.messages,
-			Tools:     a.tools.ToolDefs(),
-			MaxTokens: a.config.MaxTokens,
+			Model:        a.config.Model,
+			System:       systemPrompt,
+			SystemBlocks: systemBlocks,
+			Messages:     a.messages,
+			Tools:        a.tools.ToolDefs(),
+			MaxTokens:    a.config.MaxTokens,
 		}
 
 		// 流式调用 API（带重试）

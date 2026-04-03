@@ -25,14 +25,33 @@ type Provider interface {
 	Capabilities() Capabilities
 }
 
+// SystemBlock 系统提示词块（支持 cache_control）
+type SystemBlock struct {
+	Text         string `json:"text"`
+	CacheControl string `json:"cache_control,omitempty"` // "ephemeral" 表示启用缓存
+}
+
 // Request 统一的 API 请求
 type Request struct {
-	Model       string
-	System      string
-	Messages    []Message
-	Tools       []ToolDef
-	MaxTokens   int
-	Temperature float64
+	Model        string
+	System       string         // 兼容：单字符串 system prompt
+	SystemBlocks []SystemBlock  // 优先：分块 system prompt（支持 cache_control）
+	Messages     []Message
+	Tools        []ToolDef
+	MaxTokens    int
+	Temperature  float64
+}
+
+// EffectiveSystemBlocks 返回生效的 SystemBlock 列表
+// 如果 SystemBlocks 非空则使用它，否则将 System string 转为单个 block
+func (r *Request) EffectiveSystemBlocks() []SystemBlock {
+	if len(r.SystemBlocks) > 0 {
+		return r.SystemBlocks
+	}
+	if r.System != "" {
+		return []SystemBlock{{Text: r.System}}
+	}
+	return nil
 }
 
 // ToolDef 工具定义（传给 API 的 schema）
