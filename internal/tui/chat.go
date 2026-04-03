@@ -309,9 +309,22 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 				lineContent := lines[mouseMsg.Y]
 				for _, m := range c.toggleMarkers {
 					if m.msgIdx < len(c.messages) && strings.Contains(lineContent, m.marker) {
+						// 保存当前滚动位置
+						prevOffset := c.viewport.YOffset
+
 						c.messages[m.msgIdx].Folded = !c.messages[m.msgIdx].Folded
 						c.invalidateCache()
 						c.refreshContent(false)
+
+						// 恢复滚动位置，防止内容跳变
+						maxOffset := c.viewport.TotalLineCount() - c.viewport.Height
+						if maxOffset < 0 {
+							maxOffset = 0
+						}
+						if prevOffset > maxOffset {
+							prevOffset = maxOffset
+						}
+						c.viewport.SetYOffset(prevOffset)
 						break
 					}
 				}
@@ -521,7 +534,12 @@ func (c ChatView) ViewWithHint() string {
 		count := c.countNewMessages()
 		hint := lipgloss.NewStyle().Foreground(ColorBrand).Render(
 			fmt.Sprintf("  ↓ %d 条新消息，按 End 跳到最新", count))
-		return view + "\n" + hint
+		// 替换最后一行而非追加，保持行数 == viewport.Height，避免鼠标坐标偏移
+		lines := strings.Split(view, "\n")
+		if len(lines) > 0 {
+			lines[len(lines)-1] = hint
+		}
+		return strings.Join(lines, "\n")
 	}
 	return view
 }
