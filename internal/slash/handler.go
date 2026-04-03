@@ -70,6 +70,7 @@ type Context struct {
 	OnSkillsList  func() string    // /skills
 	OnPluginsList func() string    // /plugins
 	OnHooksList   func() string    // /hooks
+	OnThemeSwitch func(string) string // /theme <dark|light>
 }
 
 // Handler 斜杠命令路由器
@@ -155,6 +156,7 @@ func (h *Handler) registerAll() {
 	h.register(cmdPermissions())
 	h.register(cmdCost())
 	h.register(cmdStatus())
+	h.register(cmdTheme())
 
 	// 开发工作流类
 	h.register(cmdCommit())
@@ -199,7 +201,7 @@ func cmdHelp(h *Handler) *Command {
 				cmds []string
 			}{
 				{"会话管理", []string{"/session", "/resume", "/compact", "/clear", "/export", "/quit"}},
-				{"模型与配置", []string{"/model", "/provider", "/config", "/login", "/logout", "/permissions", "/cost"}},
+				{"模型与配置", []string{"/model", "/provider", "/config", "/login", "/logout", "/permissions", "/cost", "/theme"}},
 				{"开发工作流", []string{"/commit", "/pr", "/review", "/diff", "/plan", "/test", "/init", "/branch", "/refactor"}},
 				{"系统信息", []string{"/status", "/env", "/version", "/context", "/tips", "/doctor", "/bug", "/upgrade"}},
 				{"扩展功能", []string{"/mcp", "/memory", "/skills", "/plugins", "/hooks", "/agents", "/team"}},
@@ -861,6 +863,27 @@ func cmdDoctor() *Command {
 			}
 
 			return Result{Type: ResultDisplay, Content: sb.String()}
+		},
+	}
+}
+
+func cmdTheme() *Command {
+	return &Command{
+		Name:        "/theme",
+		Description: "切换主题 (dark/light)",
+		Handler: func(args []string, ctx *Context) Result {
+			if len(args) == 0 {
+				return Result{Type: ResultDisplay, Content: "用法: /theme dark 或 /theme light"}
+			}
+			mode := strings.ToLower(args[0])
+			if mode != "dark" && mode != "light" {
+				return Result{Type: ResultDisplay, Content: "可用主题: dark, light"}
+			}
+			if ctx.OnThemeSwitch != nil {
+				msg := ctx.OnThemeSwitch(mode)
+				return Result{Type: ResultDisplay, Content: msg}
+			}
+			return Result{Type: ResultDisplay, Content: "主题切换功能未就绪"}
 		},
 	}
 }

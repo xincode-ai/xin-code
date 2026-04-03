@@ -66,6 +66,7 @@ type App struct {
 	OnExport      func() string
 	OnInterrupt   func()
 	OnResume      func() string
+	OnThemeSwitch func(string) string
 	OnLogin       func() string
 	OnLogout      func() string
 	OnSkillsList  func() string
@@ -474,6 +475,18 @@ func (a *App) handleSlashCommand(cmd string) (tea.Model, tea.Cmd) {
 		OnSkillsList:        a.OnSkillsList,
 		OnPluginsList:       a.OnPluginsList,
 		OnHooksList:         a.OnHooksList,
+		OnThemeSwitch: func(mode string) string {
+			switch mode {
+			case "light":
+				SetTheme(ThemeLight)
+			default:
+				SetTheme(ThemeDark)
+			}
+			// 清空 Markdown 缓存（颜色变了，需要重新渲染）
+			a.chat.mdCache = make(map[string]string)
+			a.chat.refreshContent(a.chat.shouldAutoScroll())
+			return fmt.Sprintf("已切换到 %s 主题", mode)
+		},
 	}
 
 	result, handled := a.slashHandler.Handle(cmd, ctx)
