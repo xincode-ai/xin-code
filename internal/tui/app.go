@@ -475,7 +475,7 @@ func (a *App) View() string {
 	content.Bottom = inputView + "\n" + statusView
 
 	// 主滚动区：transcript（占满剩余高度）
-	chatHeight := a.layout.MainHeight(content.Bottom, content.BottomFloat)
+	chatHeight := a.layout.MainHeight(content.Bottom, content.BottomFloat, content.Overlay)
 	a.chat, _ = a.chat.Update(tea.WindowSizeMsg{Width: contentWidth, Height: chatHeight})
 	content.Main = a.chat.View()
 
@@ -586,6 +586,7 @@ func (a *App) resizeLayout() {
 	a.input, _ = a.input.Update(tea.WindowSizeMsg{Width: contentWidth - 2})
 	a.permission, _ = a.permission.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
 	a.diff, _ = a.diff.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
+	a.resumeSelector, _ = a.resumeSelector.Update(tea.WindowSizeMsg{Width: contentWidth, Height: a.height})
 }
 
 
@@ -675,9 +676,8 @@ func commandHintsFromSlash(commands []*slash.Command) []CommandHint {
 	return hints
 }
 
-// renderWelcomeBanner 渲染 CC 风格的欢迎横幅（ASCII art + 信息）
+// renderWelcomeBanner 渲染精简欢迎横幅（ASCII art + 核心信息）
 func renderWelcomeBanner(cfg AppConfig) string {
-	// ASCII art "X" 标记（品牌橙色）
 	art := []string{
 		"  ▀▄ ▄▀",
 		"    █  ",
@@ -688,24 +688,21 @@ func renderWelcomeBanner(cfg AppConfig) string {
 	bold := lipgloss.NewStyle().Foreground(ColorText).Bold(true)
 	dim := StyleDim
 
-	// 右侧信息（与 art 对齐）
+	// 右侧信息：产品名+版本、模型、工作目录（去掉权限模式，状态栏已有）
 	info := []string{
 		bold.Render("Xin Code") + "  " + dim.Render("v"+cfg.Version),
-		dim.Render(shortModelName(cfg.Model) + " · " + permissionLabel(cfg.PermMode)),
+		dim.Render(shortModelName(cfg.Model)),
 		dim.Render(cfg.WorkDir),
 	}
 
-	// 拼合：art 在左，info 在右
 	var lines []string
-	// 顶部留空一行
 	lines = append(lines, "")
 	for i := 0; i < len(art); i++ {
-		left := orange.Render(art[i])
 		right := ""
 		if i < len(info) {
 			right = info[i]
 		}
-		lines = append(lines, left+"    "+right)
+		lines = append(lines, orange.Render(art[i])+"    "+right)
 	}
 
 	return strings.Join(lines, "\n")

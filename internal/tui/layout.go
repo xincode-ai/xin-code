@@ -48,15 +48,19 @@ func (l *Layout) Render(content LayerContent) string {
 	return strings.Join(parts, "\n")
 }
 
-// MainHeight 计算主区域可用高度
-func (l *Layout) MainHeight(bottomContent string, floatContent string) int {
+// MainHeight 计算主区域可用高度（需传入所有非主区域的内容）
+func (l *Layout) MainHeight(bottomContent, floatContent, overlayContent string) int {
 	bottomHeight := lipgloss.Height(bottomContent)
 	floatHeight := 0
 	if floatContent != "" {
 		floatHeight = lipgloss.Height(floatContent)
 	}
+	overlayHeight := 0
+	if overlayContent != "" {
+		overlayHeight = lipgloss.Height(overlayContent)
+	}
 
-	mainHeight := l.height - bottomHeight - floatHeight - 1
+	mainHeight := l.height - bottomHeight - floatHeight - overlayHeight - 1
 	if mainHeight < 4 {
 		mainHeight = 4
 	}

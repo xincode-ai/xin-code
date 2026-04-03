@@ -51,7 +51,7 @@ func (d DiffDialog) Update(msg tea.Msg) (DiffDialog, tea.Cmd) {
 		case "y", "Y":
 			d.respond(true)
 			return d, nil
-		case "n", "N":
+		case "n", "N", "esc":
 			d.respond(false)
 			return d, nil
 		}
