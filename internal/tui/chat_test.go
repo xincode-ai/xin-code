@@ -109,39 +109,46 @@ func TestClickToggleThinkingFold(t *testing.T) {
 	}
 }
 
-func TestLineToMsgMapping(t *testing.T) {
+func TestToggleLinesMapping(t *testing.T) {
 	cv := NewChatView(80, 24)
 
 	cv.messages = append(cv.messages,
 		ChatMessage{ID: "msg-1", Role: "user", Content: "hello"},
 		ChatMessage{ID: "msg-2", Role: "thinking", Content: "thinking...", Folded: true},
-		ChatMessage{ID: "msg-3", Role: "tool", ToolName: "Bash", Content: "output"},
+		ChatMessage{ID: "msg-3", Role: "tool", ToolName: "Bash", Content: "output line"},
 	)
 
 	cv.invalidateCache()
 	cv.refreshContent(true)
 
-	// lineToMsg 应非空
-	if len(cv.lineToMsg) == 0 {
-		t.Fatal("lineToMsg 不应为空")
+	// toggleLines 应只包含可折叠消息（thinking=1, tool=2），不包含 user=0
+	if len(cv.toggleLines) == 0 {
+		t.Fatal("toggleLines 不应为空")
 	}
 
-	// 第一行应对应消息 0（user）
-	if cv.lineToMsg[0] != 0 {
-		t.Errorf("第一行应对应消息 0，得到 %d", cv.lineToMsg[0])
+	// user 消息不应出现在 toggleLines 中
+	for _, idx := range cv.toggleLines {
+		if idx == 0 {
+			t.Error("user 消息不应在 toggleLines 中")
+		}
 	}
 
-	// 映射中应包含所有 3 条消息的索引
-	found := map[int]bool{}
-	for _, idx := range cv.lineToMsg {
-		if idx >= 0 {
-			found[idx] = true
+	// thinking 和 tool 消息应出现
+	foundThinking := false
+	foundTool := false
+	for _, idx := range cv.toggleLines {
+		if idx == 1 {
+			foundThinking = true
+		}
+		if idx == 2 {
+			foundTool = true
 		}
 	}
-	for i := 0; i < 3; i++ {
-		if !found[i] {
-			t.Errorf("消息 %d 未在 lineToMsg 中出现", i)
-		}
+	if !foundThinking {
+		t.Error("thinking 消息应在 toggleLines 中")
+	}
+	if !foundTool {
+		t.Error("tool 消息应在 toggleLines 中")
 	}
 }
 
