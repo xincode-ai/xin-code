@@ -103,6 +103,30 @@ func TestHistorySearch(t *testing.T) {
 	}
 }
 
+func TestExtractPathPrefix(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"", ""},
+		{"hello", ""},
+		{"./src/", "./src/"},
+		{"read ../config", "../config"},
+		{"/usr/local/bin/", "/usr/local/bin/"},
+		{"看看 ~/Desktop/", "~/Desktop/"},
+		{"internal/tui/app", "internal/tui/app"},
+		{"/help", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := extractPathPrefix(tt.input)
+			if got != tt.want {
+				t.Errorf("extractPathPrefix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPasteReferenceExpansion(t *testing.T) {
 	ib := NewInputBox(nil)
 	// 模拟一次粘贴

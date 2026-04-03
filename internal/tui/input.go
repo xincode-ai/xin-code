@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -34,6 +36,10 @@ type InputBox struct {
 	searchQuery   string
 	searchResults []string
 	searchIdx     int
+
+	// 文件路径补全
+	pathCompletions []string
+	pathCompIdx     int
 
 	// 粘贴内容存储
 	pasteStore  map[int]string // pasteID → 原始内容
@@ -157,7 +163,7 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 
 		switch msg.Type {
 		case tea.KeyTab:
-			// Tab 补全斜杠命令
+			// 优先：slash 命令补全
 			if len(i.completionItems) > 0 {
 				idx := i.completionIdx
 				if idx < 0 {
@@ -166,6 +172,24 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 				i.textarea.SetValue(i.completionItems[idx].Name + " ")
 				i.completionIdx = -1
 				i.completionItems = nil
+				return i, nil
+			}
+			// 路径补全列表导航（连续 Tab 循环）
+			if len(i.pathCompletions) > 0 {
+				if i.pathCompIdx >= 0 && i.pathCompIdx < len(i.pathCompletions) {
+					text := i.textarea.Value()
+					prefix := extractPathPrefix(text)
+					newText := strings.TrimSuffix(text, prefix) + i.pathCompletions[i.pathCompIdx]
+					i.textarea.SetValue(newText)
+					i.pathCompIdx++
+					if i.pathCompIdx >= len(i.pathCompletions) {
+						i.pathCompIdx = 0
+					}
+				}
+				return i, nil
+			}
+			// 尝试路径补全
+			if i.completeFilePath() {
 				return i, nil
 			}
 
@@ -284,6 +308,12 @@ func (i InputBox) Update(msg tea.Msg) (InputBox, tea.Cmd) {
 		i.completionIdx = -1
 	}
 
+	// 非 Tab 键清除路径补全状态
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.Type != tea.KeyTab {
+		i.pathCompletions = nil
+		i.pathCompIdx = -1
+	}
+
 	return i, cmd
 }
 
@@ -293,6 +323,8 @@ func (i InputBox) View() string {
 		sections = append(sections, i.renderSearchPanel())
 	} else if hint := i.renderSlashHint(); hint != "" {
 		sections = append(sections, hint)
+	} else if len(i.pathCompletions) > 0 {
+		sections = append(sections, i.renderPathHint())
 	}
 	sections = append(sections, i.textarea.View())
 	return strings.Join(sections, "\n")
@@ -384,6 +416,9 @@ func (i InputBox) Value() string {
 func (i InputBox) Height() int {
 	height := i.textarea.Height()
 	if hint := i.renderSlashHint(); hint != "" {
+		height += lipgloss.Height(hint)
+	} else if len(i.pathCompletions) > 0 {
+		hint := i.renderPathHint()
 		height += lipgloss.Height(hint)
 	}
 	return height
@@ -623,4 +658,119 @@ func commonPrefix(commands []CommandHint) string {
 		}
 	}
 	return prefix
+}
+
+// extractPathPrefix 从输入文本中提取末尾的路径前缀
+func extractPathPrefix(input string) string {
+	// 以 "/" 开头、不含空格、且只有一个 "/" → slash 命令，不是路径
+	if strings.HasPrefix(input, "/") && !strings.Contains(input, " ") &&
+		!strings.Contains(input[1:], "/") {
+		return ""
+	}
+	parts := strings.Fields(input)
+	if len(parts) == 0 {
+		return ""
+	}
+	last := parts[len(parts)-1]
+	if strings.HasPrefix(last, "./") || strings.HasPrefix(last, "../") ||
+		strings.HasPrefix(last, "/") || strings.HasPrefix(last, "~/") ||
+		strings.Contains(last, "/") {
+		return last
+	}
+	return ""
+}
+
+// completeFilePath 尝试对输入末尾的路径前缀进行 glob 补全
+func (i *InputBox) completeFilePath() bool {
+	text := i.textarea.Value()
+	prefix := extractPathPrefix(text)
+	if prefix == "" {
+		return false
+	}
+	expandedPrefix := prefix
+	if strings.HasPrefix(prefix, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			expandedPrefix = home + prefix[1:]
+		}
+	}
+	pattern := expandedPrefix + "*"
+	matches, err := filepath.Glob(pattern)
+	if err != nil || len(matches) == 0 {
+		return false
+	}
+	sort.Strings(matches)
+	var completions []string
+	for _, m := range matches {
+		// 还原 ~/ 前缀
+		if strings.HasPrefix(prefix, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				m = "~/" + strings.TrimPrefix(m, home+"/")
+			}
+		}
+		if info, err := os.Stat(m); err == nil && info.IsDir() {
+			m += "/"
+		}
+		completions = append(completions, m)
+	}
+	// 唯一匹配：直接补全
+	if len(completions) == 1 {
+		newText := strings.TrimSuffix(text, prefix) + completions[0]
+		i.textarea.SetValue(newText)
+		return true
+	}
+	i.pathCompletions = completions
+	i.pathCompIdx = 0
+	return true
+}
+
+// renderPathHint 渲染路径补全列表（圆角边框，dim 色）
+func (i InputBox) renderPathHint() string {
+	if len(i.pathCompletions) == 0 {
+		return ""
+	}
+
+	boxWidth := min(72, max(34, i.width-2))
+	maxVisible := 8
+
+	// 滑动视口
+	start := 0
+	if i.pathCompIdx >= maxVisible {
+		start = i.pathCompIdx - maxVisible + 1
+	}
+	end := start + maxVisible
+	if end > len(i.pathCompletions) {
+		end = len(i.pathCompletions)
+		start = max(0, end-maxVisible)
+	}
+
+	var lines []string
+
+	if start > 0 {
+		lines = append(lines, StyleDim.Render(fmt.Sprintf("  ↑ 还有 %d 个", start)))
+	}
+
+	for idx := start; idx < end; idx++ {
+		entry := i.pathCompletions[idx]
+		if len(entry) > boxWidth-4 {
+			entry = entry[:boxWidth-7] + "..."
+		}
+		if idx == i.pathCompIdx {
+			lines = append(lines, lipgloss.NewStyle().Foreground(ColorBrand).Bold(true).Render("❯ "+entry))
+		} else {
+			lines = append(lines, StyleDim.Render("  "+entry))
+		}
+	}
+
+	if end < len(i.pathCompletions) {
+		lines = append(lines, StyleDim.Render(fmt.Sprintf("  ↓ 还有 %d 个", len(i.pathCompletions)-end)))
+	}
+
+	lines = append(lines, StyleDim.Render("  Tab 循环选择"))
+
+	return lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(ColorTextDim).
+		PaddingLeft(1).
+		Width(boxWidth).
+		Render(strings.Join(lines, "\n"))
 }
