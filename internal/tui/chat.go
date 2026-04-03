@@ -299,25 +299,25 @@ func (c ChatView) Update(msg tea.Msg) (ChatView, tea.Cmd) {
 		c.refreshContent(stick)
 	}
 
-	// 鼠标左键点击：从 viewport 实际行内容匹配 ▶/▼ 标记
+	// 鼠标左键点击/释放：拦截（防止穿透到 viewport 触发滚动）
 	if mouseMsg, ok := msg.(tea.MouseMsg); ok &&
-		mouseMsg.Button == tea.MouseButtonLeft && mouseMsg.Action == tea.MouseActionRelease {
-		// 获取点击位置对应的 viewport 内容行
-		clickedLine := mouseMsg.Y + c.viewport.YOffset
-		lines := strings.Split(c.viewport.View(), "\n")
-		if mouseMsg.Y >= 0 && mouseMsg.Y < len(lines) {
-			lineContent := lines[mouseMsg.Y]
-			// 在标记列表中查找匹配
-			for _, m := range c.toggleMarkers {
-				if m.msgIdx < len(c.messages) && strings.Contains(lineContent, m.marker) {
-					_ = clickedLine // 不再用行号定位，纯用内容匹配
-					c.messages[m.msgIdx].Folded = !c.messages[m.msgIdx].Folded
-					c.invalidateCache()
-					c.refreshContent(false)
-					return c, nil
+		mouseMsg.Button == tea.MouseButtonLeft {
+		// 只在释放时触发 toggle
+		if mouseMsg.Action == tea.MouseActionRelease {
+			lines := strings.Split(c.viewport.View(), "\n")
+			if mouseMsg.Y >= 0 && mouseMsg.Y < len(lines) {
+				lineContent := lines[mouseMsg.Y]
+				for _, m := range c.toggleMarkers {
+					if m.msgIdx < len(c.messages) && strings.Contains(lineContent, m.marker) {
+						c.messages[m.msgIdx].Folded = !c.messages[m.msgIdx].Folded
+						c.invalidateCache()
+						c.refreshContent(false)
+						break
+					}
 				}
 			}
 		}
+		return c, nil // 左键事件始终拦截，不传给 viewport
 	}
 
 	// t 键 toggle thinking 折叠/展开（在 viewport 之前拦截）
@@ -442,18 +442,23 @@ func (c *ChatView) rebuildCommittedCache() {
 		if rendered != "" {
 			sb.WriteString(rendered)
 
-			// 收集可点击标记（用行内容匹配，不依赖行号计算）
+			// 收集可点击标记（用渲染后的实际行内容匹配，保证唯一性）
 			switch msg.Role {
 			case "thinking":
-				// thinking 的指示器是 ▶ 或 ▼ 开头
-				markers = append(markers, toggleMarker{msgIdx: i, marker: "▶"})
-				markers = append(markers, toggleMarker{msgIdx: i, marker: "▼"})
+				// 用 header 首行做标记（含字数，每条 thinking 唯一）
+				firstLine := strings.SplitN(rendered, "\n", 2)[0]
+				markers = append(markers, toggleMarker{msgIdx: i, marker: firstLine})
 			case "tool":
 				if msg.Content != "" {
-					// 工具折叠提示行含 "点击展开"
-					markers = append(markers, toggleMarker{msgIdx: i, marker: "点击展开"})
-					// 工具 header 行含 BlackCircle
-					markers = append(markers, toggleMarker{msgIdx: i, marker: BlackCircle()})
+					// header 行（含工具名+参数，每条工具唯一）
+					firstLine := strings.SplitN(rendered, "\n", 2)[0]
+					markers = append(markers, toggleMarker{msgIdx: i, marker: firstLine})
+					// 折叠提示行
+					rlines := strings.Split(rendered, "\n")
+					lastLine := rlines[len(rlines)-1]
+					if strings.Contains(lastLine, "点击展开") {
+						markers = append(markers, toggleMarker{msgIdx: i, marker: lastLine})
+					}
 				}
 			}
 		}
