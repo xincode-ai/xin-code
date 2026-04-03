@@ -317,6 +317,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case MsgAgentDone:
 		a.state = StateInput
+		a.ccSpinner.ClearSubAgents()
 		a.ccSpinner.Stop()
 		if msg.Err != nil {
 			a.chat, _ = a.chat.Update(MsgError{Err: msg.Err})
@@ -344,11 +345,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case MsgSubAgentStart:
+		a.ccSpinner.AddSubAgent(msg.ID, msg.Description)
 		a.chat, _ = a.chat.Update(msg)
 		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
 
 	case MsgSubAgentDone:
+		a.ccSpinner.CompleteSubAgent(msg.ID)
 		a.chat, _ = a.chat.Update(msg)
 		cmds = append(cmds, a.safeWaitForEvent())
 		return a, tea.Batch(cmds...)
